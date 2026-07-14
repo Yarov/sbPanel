@@ -189,13 +189,15 @@ function App() {
               >
                 {STATUS_LABEL[t.status] ?? t.status}
               </button>
-              <button
-                className={`prio prio-${t.priority}`}
-                onClick={() => setField(t.id, "priority", next(PRIORITIES, t.priority))}
-                title="Clic para cambiar prioridad"
-              >
-                {PRIORITY_LABEL[t.priority] ?? t.priority}
-              </button>
+              {t.priority && (
+                <button
+                  className={`prio prio-${t.priority}`}
+                  onClick={() => setField(t.id, "priority", next(PRIORITIES, t.priority))}
+                  title="Clic para cambiar prioridad"
+                >
+                  {PRIORITY_LABEL[t.priority] ?? t.priority}
+                </button>
+              )}
               <span className="record-title">{t.title}</span>
               <button className="delete" onClick={() => remove(t.id)} title="Borrar">×</button>
             </div>
