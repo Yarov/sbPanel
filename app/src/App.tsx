@@ -86,9 +86,18 @@ function Tickets({ profile }: { profile: Profile }) {
   const [assignee, setAssignee] = useState("");
   const [filter, setFilter] = useState<string>("todos");
   const [error, setError] = useState("");
+  const [myAddrs, setMyAddrs] = useState<string[]>([]);
+  const [dialAddr, setDialAddr] = useState("");
 
   async function refresh() {
     setTickets(await invoke<Ticket[]>("list_tickets"));
+  }
+
+  async function connect() {
+    const addr = dialAddr.trim();
+    if (!addr) return;
+    await invoke("dial", { addr });
+    setDialAddr("");
   }
 
   useEffect(() => {
@@ -96,6 +105,9 @@ function Tickets({ profile }: { profile: Profile }) {
     const unsubs = [
       listen<number>("peers-changed", (e) => setPeers(e.payload)),
       listen("doc-updated", () => refresh()),
+      listen<string>("listen-addr", (e) =>
+        setMyAddrs((prev) => (prev.includes(e.payload) ? prev : [...prev, e.payload]))
+      ),
     ];
     return () => unsubs.forEach((p) => p.then((un) => un()));
   }, []);
@@ -169,6 +181,32 @@ function Tickets({ profile }: { profile: Profile }) {
           <button className="ghost" onClick={exportDoc}>Exportar</button>
           <button className="ghost" onClick={importDoc}>Importar</button>
         </div>
+      </div>
+
+      <div className="netbar">
+        <span className="net-label">Tu dirección:</span>
+        {myAddrs.length ? (
+          myAddrs.map((a) => (
+            <code
+              key={a}
+              className="net-addr"
+              title="Clic para copiar"
+              onClick={() => navigator.clipboard.writeText(a)}
+            >
+              {a}
+            </code>
+          ))
+        ) : (
+          <span className="net-muted">buscando…</span>
+        )}
+        <input
+          value={dialAddr}
+          onChange={(e) => setDialAddr(e.currentTarget.value)}
+          onKeyDown={(e) => e.key === "Enter" && connect()}
+          placeholder="Conectar a otra máquina (ip:puerto)"
+          className="net-input"
+        />
+        <button className="ghost" onClick={connect}>Conectar</button>
       </div>
 
       <form className="add-form" onSubmit={add}>

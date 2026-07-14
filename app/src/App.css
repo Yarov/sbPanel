@@ -151,6 +151,40 @@ button:hover {
   color: var(--red-hover);
 }
 
+/* ---------- barra de red ---------- */
+.netbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.82rem;
+}
+.net-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+.net-addr {
+  background: var(--surface-3);
+  color: #60a5fa;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.net-muted {
+  color: var(--muted);
+}
+.net-input {
+  flex: 1;
+  min-width: 180px;
+  margin-left: auto;
+}
+
 /* ---------- form ---------- */
 .add-form {
   display: flex;

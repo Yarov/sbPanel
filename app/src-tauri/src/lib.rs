@@ -27,14 +27,17 @@ impl p2p::Events for TauriEvents {
     fn doc_updated(&self) {
         let _ = self.0.emit("doc-updated", ());
     }
+    fn listen_addr(&self, addr: String) {
+        let _ = self.0.emit("listen-addr", addr);
+    }
 }
 
 struct AppState {
     store: Arc<Mutex<crdt::Store>>,
     /// Sufijo corto del peer id local — identifica esta máquina en los ids de record.
     local_short: String,
-    /// Señala al swarm que el doc local cambió y debe propagarse.
-    broadcast_tx: mpsc::UnboundedSender<()>,
+    /// Canal de órdenes hacia el swarm (broadcast / dial).
+    cmd_tx: mpsc::UnboundedSender<p2p::Cmd>,
     counter: AtomicU64,
     profile: Mutex<Option<Profile>>,
     profile_path: PathBuf,
@@ -65,6 +68,15 @@ fn load_or_create_keypair(path: &Path) -> Keypair {
 #[tauri::command]
 fn whoami(state: State<'_, AppState>) -> String {
     state.local_short.clone()
+}
+
+/// Conecta directo a otra máquina por "ip:puerto" (cruza subredes; no depende de mDNS).
+#[tauri::command]
+fn dial(state: State<'_, AppState>, addr: String) -> Result<(), String> {
+    state
+        .cmd_tx
+        .send(p2p::Cmd::Dial(addr))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -140,7 +152,7 @@ fn add_ticket(
     };
 
     // avisa al swarm para propagar de inmediato (ignora error si el swarm no arrancó)
-    let _ = state.broadcast_tx.send(());
+    let _ = state.cmd_tx.send(p2p::Cmd::Broadcast);
     Ok(tickets)
 }
 
@@ -161,7 +173,7 @@ fn update_field(
         store.save().map_err(|e| e.to_string())?;
         store.list_tickets()
     };
-    let _ = state.broadcast_tx.send(());
+    let _ = state.cmd_tx.send(p2p::Cmd::Broadcast);
     Ok(tickets)
 }
 
@@ -173,7 +185,7 @@ fn delete_ticket(state: State<'_, AppState>, id: String) -> Result<Vec<crdt::Tic
         store.save().map_err(|e| e.to_string())?;
         store.list_tickets()
     };
-    let _ = state.broadcast_tx.send(());
+    let _ = state.cmd_tx.send(p2p::Cmd::Broadcast);
     Ok(tickets)
 }
 
@@ -195,7 +207,7 @@ fn import_doc(state: State<'_, AppState>, path: String) -> Result<Vec<crdt::Tick
         store.save().map_err(|e| e.to_string())?;
         store.list_tickets()
     };
-    let _ = state.broadcast_tx.send(());
+    let _ = state.cmd_tx.send(p2p::Cmd::Broadcast);
     Ok(tickets)
 }
 
@@ -225,12 +237,12 @@ pub fn run() {
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok());
 
-            let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel::<()>();
+            let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<p2p::Cmd>();
 
             app.manage(AppState {
                 store: store.clone(),
                 local_short,
-                broadcast_tx,
+                cmd_tx,
                 counter: AtomicU64::new(0),
                 profile: Mutex::new(profile),
                 profile_path,
@@ -253,7 +265,7 @@ pub fn run() {
                 };
                 rt.block_on(async move {
                     let events = TauriEvents(handle);
-                    if let Err(e) = p2p::run(keypair, store_for_task, events, broadcast_rx).await {
+                    if let Err(e) = p2p::run(keypair, store_for_task, events, cmd_rx).await {
                         eprintln!("swarm P2P terminó con error: {e}");
                     }
                 });
@@ -263,6 +275,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             whoami,
+            dial,
             get_profile,
             set_profile,
             list_tickets,

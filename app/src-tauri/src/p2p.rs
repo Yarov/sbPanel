@@ -14,9 +14,9 @@ use crate::crdt::Store;
 use anyhow::Result;
 use futures::StreamExt;
 use libp2p::{
-    gossipsub, identity::Keypair, mdns, noise,
+    gossipsub, identity::Keypair, mdns, multiaddr::Protocol, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, PeerId, Swarm,
+    tcp, yamux, Multiaddr, PeerId, Swarm,
 };
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -25,11 +25,33 @@ use tokio::sync::mpsc;
 
 const TOPIC: &str = "scotia-crdt";
 
+/// Órdenes de la UI hacia el swarm.
+pub enum Cmd {
+    /// El doc local cambió; propágalo.
+    Broadcast,
+    /// Conecta a una máquina por "ip:puerto" o un multiaddr.
+    Dial(String),
+}
+
 /// Salidas del swarm hacia la capa de UI. Desacopla el P2P de Tauri para poder
 /// testear la sincronización headless (ver tests).
 pub trait Events: Send + 'static {
     fn peers_changed(&self, n: usize);
     fn doc_updated(&self);
+    /// Dirección LAN donde este nodo escucha ("ip:puerto"), para compartir.
+    fn listen_addr(&self, addr: String);
+}
+
+/// Convierte "ip:puerto" (o un multiaddr "/ip4/.../tcp/...") en Multiaddr.
+fn parse_dial_addr(s: &str) -> anyhow::Result<Multiaddr> {
+    let s = s.trim();
+    if s.starts_with('/') {
+        Ok(s.parse()?)
+    } else if let Some((ip, port)) = s.rsplit_once(':') {
+        Ok(format!("/ip4/{}/tcp/{}", ip.trim(), port.trim()).parse()?)
+    } else {
+        anyhow::bail!("usa formato ip:puerto");
+    }
 }
 
 #[derive(NetworkBehaviour)]
@@ -44,7 +66,7 @@ pub async fn run<E: Events>(
     keypair: Keypair,
     store: Arc<Mutex<Store>>,
     events: E,
-    mut broadcast_rx: mpsc::UnboundedReceiver<()>,
+    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
 ) -> Result<()> {
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
@@ -85,12 +107,39 @@ pub async fn run<E: Events>(
                 let data = store.lock().unwrap().snapshot();
                 publish(&mut swarm, &topic, data);
             }
-            Some(_) = broadcast_rx.recv() => {
-                // un comando local cambió el doc → propágalo de inmediato
-                let data = store.lock().unwrap().snapshot();
-                publish(&mut swarm, &topic, data);
-            }
+            Some(cmd) = cmd_rx.recv() => match cmd {
+                Cmd::Broadcast => {
+                    let data = store.lock().unwrap().snapshot();
+                    publish(&mut swarm, &topic, data);
+                }
+                Cmd::Dial(addr) => match parse_dial_addr(&addr) {
+                    Ok(ma) => {
+                        println!("☎️  conectando a {ma}");
+                        if let Err(e) = swarm.dial(ma) {
+                            eprintln!("dial error: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("dirección inválida '{addr}': {e}"),
+                },
+            },
             event = swarm.select_next_some() => match event {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    // publica la dirección LAN (ip:puerto) para compartir con otras máquinas
+                    let mut ip = None;
+                    let mut port = None;
+                    for p in address.iter() {
+                        match p {
+                            Protocol::Ip4(a) => ip = Some(a.to_string()),
+                            Protocol::Tcp(p) => port = Some(p),
+                            _ => {}
+                        }
+                    }
+                    if let (Some(ip), Some(port)) = (ip, port) {
+                        if ip != "127.0.0.1" {
+                            events.listen_addr(format!("{ip}:{port}"));
+                        }
+                    }
+                }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     connected.insert(peer_id);
                     events.peers_changed(connected.len());
@@ -152,6 +201,7 @@ mod tests {
     impl Events for TestEvents {
         fn peers_changed(&self, _n: usize) {}
         fn doc_updated(&self) {}
+        fn listen_addr(&self, _addr: String) {}
     }
 
     // Corre DOS swarms de producción en esta máquina: A agrega un record y B
@@ -193,7 +243,7 @@ mod tests {
                     .unwrap();
                 s.save().unwrap();
             }
-            tx_a.send(()).unwrap();
+            tx_a.send(Cmd::Broadcast).unwrap();
 
             // espera propagación
             tokio::time::sleep(Duration::from_secs(6)).await;
