@@ -189,7 +189,8 @@ mod tests {
             // A agrega un record y notifica a su swarm para propagar
             {
                 let mut s = store_a.lock().unwrap();
-                s.add_record("a-1", "hola-p2p", "ana", 1000).unwrap();
+                s.add_ticket("a-1", "hola-p2p", "", "media", "", "ana", 1000)
+                    .unwrap();
                 s.save().unwrap();
             }
             tx_a.send(()).unwrap();
@@ -197,7 +198,7 @@ mod tests {
             // espera propagación
             tokio::time::sleep(Duration::from_secs(6)).await;
 
-            let recs_b = store_b.lock().unwrap().list_records();
+            let recs_b = store_b.lock().unwrap().list_tickets();
             let _ = std::fs::remove_dir_all(&dir);
 
             assert!(

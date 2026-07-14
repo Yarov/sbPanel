@@ -58,69 +58,83 @@ fn whoami(state: State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
-fn list_records(state: State<'_, AppState>) -> Vec<crdt::Record> {
-    state.store.lock().unwrap().list_records()
+fn list_tickets(state: State<'_, AppState>) -> Vec<crdt::Ticket> {
+    state.store.lock().unwrap().list_tickets()
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
-fn add_record(
+fn add_ticket(
     state: State<'_, AppState>,
     title: String,
+    description: String,
+    priority: String,
+    assignee: String,
     author: String,
-) -> Result<Vec<crdt::Record>, String> {
+) -> Result<Vec<crdt::Ticket>, String> {
     let title = title.trim().to_string();
-    let author = author.trim().to_string();
     if title.is_empty() {
-        return Err("El título no puede estar vacío".into());
+        return Err("El asunto no puede estar vacío".into());
     }
+    let priority = if priority.is_empty() { "media".into() } else { priority };
 
     let n = state.counter.fetch_add(1, Ordering::Relaxed);
     // id único global: máquina + tiempo + contador local → sin colisiones entre peers.
     let id = format!("{}-{}-{}", state.local_short, now_millis(), n);
 
-    let records = {
+    let tickets = {
         let mut store = state.store.lock().unwrap();
         store
-            .add_record(&id, &title, &author, now_millis())
+            .add_ticket(
+                &id,
+                &title,
+                description.trim(),
+                &priority,
+                assignee.trim(),
+                author.trim(),
+                now_millis(),
+            )
             .map_err(|e| e.to_string())?;
         store.save().map_err(|e| e.to_string())?;
-        store.list_records()
+        store.list_tickets()
     };
 
     // avisa al swarm para propagar de inmediato (ignora error si el swarm no arrancó)
     let _ = state.broadcast_tx.send(());
-    Ok(records)
+    Ok(tickets)
+}
+
+/// Actualiza un campo editable del ticket (status | priority | assignee).
+#[tauri::command]
+fn update_field(
+    state: State<'_, AppState>,
+    id: String,
+    field: String,
+    value: String,
+) -> Result<Vec<crdt::Ticket>, String> {
+    if !matches!(field.as_str(), "status" | "priority" | "assignee") {
+        return Err(format!("campo no editable: {field}"));
+    }
+    let tickets = {
+        let mut store = state.store.lock().unwrap();
+        store.set_field(&id, &field, &value).map_err(|e| e.to_string())?;
+        store.save().map_err(|e| e.to_string())?;
+        store.list_tickets()
+    };
+    let _ = state.broadcast_tx.send(());
+    Ok(tickets)
 }
 
 #[tauri::command]
-fn update_status(
-    state: State<'_, AppState>,
-    id: String,
-    status: String,
-) -> Result<Vec<crdt::Record>, String> {
-    let records = {
+fn delete_ticket(state: State<'_, AppState>, id: String) -> Result<Vec<crdt::Ticket>, String> {
+    let tickets = {
         let mut store = state.store.lock().unwrap();
-        store.set_status(&id, &status).map_err(|e| e.to_string())?;
+        store.delete_ticket(&id).map_err(|e| e.to_string())?;
         store.save().map_err(|e| e.to_string())?;
-        store.list_records()
+        store.list_tickets()
     };
     let _ = state.broadcast_tx.send(());
-    Ok(records)
-}
-
-#[tauri::command]
-fn delete_record(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<Vec<crdt::Record>, String> {
-    let records = {
-        let mut store = state.store.lock().unwrap();
-        store.delete_record(&id).map_err(|e| e.to_string())?;
-        store.save().map_err(|e| e.to_string())?;
-        store.list_records()
-    };
-    let _ = state.broadcast_tx.send(());
-    Ok(records)
+    Ok(tickets)
 }
 
 /// Exporta la réplica completa a un archivo (sneakernet: copiar por USB a un
@@ -133,16 +147,16 @@ fn export_doc(state: State<'_, AppState>, path: String) -> Result<(), String> {
 
 /// Importa un archivo exportado y lo mergea (nunca pisa datos locales).
 #[tauri::command]
-fn import_doc(state: State<'_, AppState>, path: String) -> Result<Vec<crdt::Record>, String> {
+fn import_doc(state: State<'_, AppState>, path: String) -> Result<Vec<crdt::Ticket>, String> {
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let records = {
+    let tickets = {
         let mut store = state.store.lock().unwrap();
         store.merge_bytes(&bytes).map_err(|e| e.to_string())?;
         store.save().map_err(|e| e.to_string())?;
-        store.list_records()
+        store.list_tickets()
     };
     let _ = state.broadcast_tx.send(());
-    Ok(records)
+    Ok(tickets)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -202,10 +216,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             whoami,
-            list_records,
-            add_record,
-            update_status,
-            delete_record,
+            list_tickets,
+            add_ticket,
+            update_field,
+            delete_ticket,
             export_doc,
             import_doc
         ])

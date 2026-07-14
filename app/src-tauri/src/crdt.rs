@@ -1,11 +1,10 @@
 //! Capa CRDT: documento automerge persistido en disco (local-first).
 //!
-//! Diseño merge-safe (aprendido en el spike Fase 0): cada record vive como una
-//! llave ÚNICA directamente en ROOT. Como los ids son únicos por nodo, dos nodos
-//! nunca crean la misma llave-objeto en concurrencia, así que el `merge` de
-//! automerge nunca pisa datos. NUNCA crear un contenedor "records" compartido con
-//! put_object en cada nodo: eso genera dos objetos peleando por la misma llave y
-//! el merge tira uno con todo su contenido.
+//! Modelo simple de TICKET. Diseño merge-safe (aprendido en el spike): cada ticket
+//! vive como una llave ÚNICA directamente en ROOT. Como los ids son únicos por nodo,
+//! dos nodos nunca crean la misma llave-objeto en concurrencia, así que el `merge`
+//! nunca pisa datos. NUNCA crear un contenedor "tickets" compartido con put_object
+//! en cada nodo (generaría dos objetos peleando por la misma llave y el merge tira uno).
 
 use automerge::{
     transaction::Transactable, Automerge, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT,
@@ -14,11 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Record {
+pub struct Ticket {
     pub id: String,
     pub title: String,
+    pub description: String,
+    pub priority: String, // baja | media | alta
+    pub assignee: String,
+    pub status: String, // abierto | en_progreso | resuelto
     pub author: String,
-    pub status: String,
     pub created_at: i64,
 }
 
@@ -47,11 +49,27 @@ impl Store {
         Ok(())
     }
 
-    /// Agrega un record. `id` debe ser único (p.ej. autor + timestamp/contador).
-    pub fn add_record(
+    /// Serializa el doc completo para mandarlo a otros peers.
+    pub fn snapshot(&mut self) -> Vec<u8> {
+        self.doc.save()
+    }
+
+    /// Mergea el doc de otro peer. Devuelve cuántos cambios nuevos entraron.
+    pub fn merge_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<usize> {
+        let mut remote = Automerge::load(bytes)?;
+        let new_changes = self.doc.merge(&mut remote)?;
+        Ok(new_changes.len())
+    }
+
+    /// Crea un ticket. `id` debe ser único (p.ej. máquina + timestamp + contador).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_ticket(
         &mut self,
         id: &str,
         title: &str,
+        description: &str,
+        priority: &str,
+        assignee: &str,
         author: &str,
         created_at: i64,
     ) -> anyhow::Result<()> {
@@ -59,35 +77,30 @@ impl Store {
         let obj = tx.put_object(ROOT, id, ObjType::Map)?;
         tx.put(&obj, "id", id.to_string())?;
         tx.put(&obj, "title", title.to_string())?;
+        tx.put(&obj, "description", description.to_string())?;
+        tx.put(&obj, "priority", priority.to_string())?;
+        tx.put(&obj, "assignee", assignee.to_string())?;
+        tx.put(&obj, "status", "abierto".to_string())?;
         tx.put(&obj, "author", author.to_string())?;
-        tx.put(&obj, "status", "pendiente".to_string())?;
         tx.put(&obj, "created_at", created_at)?;
         tx.commit();
         Ok(())
     }
 
-    /// Devuelve el ObjId de un record por su id (sin mantener el borrow del doc).
-    fn find_obj(&self, id: &str) -> Option<ObjId> {
-        match self.doc.get(ROOT, id) {
-            Ok(Some((Value::Object(ObjType::Map), obj))) => Some(obj),
-            _ => None,
-        }
-    }
-
-    /// Cambia el estado de un record. Merge-safe: distinta llave por record;
-    /// si dos nodos editan el MISMO estado a la vez, automerge resuelve por LWW
-    /// determinista (nadie crashea, ambos convergen al mismo valor).
-    pub fn set_status(&mut self, id: &str, status: &str) -> anyhow::Result<()> {
+    /// Cambia un campo de texto de un ticket (status, priority, assignee, ...).
+    /// Merge-safe: llave única por ticket; edición concurrente del MISMO campo se
+    /// resuelve por LWW determinista (nadie crashea, ambos convergen).
+    pub fn set_field(&mut self, id: &str, field: &str, value: &str) -> anyhow::Result<()> {
         if let Some(obj) = self.find_obj(id) {
             let mut tx = self.doc.transaction();
-            tx.put(&obj, "status", status.to_string())?;
+            tx.put(&obj, field, value.to_string())?;
             tx.commit();
         }
         Ok(())
     }
 
-    /// Borra un record (elimina su llave en ROOT).
-    pub fn delete_record(&mut self, id: &str) -> anyhow::Result<()> {
+    /// Borra un ticket (elimina su llave en ROOT).
+    pub fn delete_ticket(&mut self, id: &str) -> anyhow::Result<()> {
         if self.find_obj(id).is_some() {
             let mut tx = self.doc.transaction();
             tx.delete(ROOT, id)?;
@@ -96,34 +109,32 @@ impl Store {
         Ok(())
     }
 
-    /// Serializa el doc completo para mandarlo a otros peers.
-    pub fn snapshot(&mut self) -> Vec<u8> {
-        self.doc.save()
-    }
-
-    /// Mergea el doc de otro peer. Devuelve cuántos cambios nuevos entraron
-    /// (0 = ya estábamos al día). automerge nunca pisa datos en el merge.
-    pub fn merge_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<usize> {
-        let mut remote = Automerge::load(bytes)?;
-        let new_changes = self.doc.merge(&mut remote)?;
-        Ok(new_changes.len())
-    }
-
-    pub fn list_records(&self) -> Vec<Record> {
+    pub fn list_tickets(&self) -> Vec<Ticket> {
         let mut out = Vec::new();
         for key in self.doc.keys(ROOT) {
             if let Ok(Some((Value::Object(ObjType::Map), obj))) = self.doc.get(ROOT, &key) {
-                out.push(Record {
+                out.push(Ticket {
                     id: self.str_at(&obj, "id"),
                     title: self.str_at(&obj, "title"),
-                    author: self.str_at(&obj, "author"),
+                    description: self.str_at(&obj, "description"),
+                    priority: self.str_at(&obj, "priority"),
+                    assignee: self.str_at(&obj, "assignee"),
                     status: self.str_at(&obj, "status"),
+                    author: self.str_at(&obj, "author"),
                     created_at: self.int_at(&obj, "created_at"),
                 });
             }
         }
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // más reciente primero
         out
+    }
+
+    /// Devuelve el ObjId de un ticket por su id (sin mantener el borrow del doc).
+    fn find_obj(&self, id: &str) -> Option<ObjId> {
+        match self.doc.get(ROOT, id) {
+            Ok(Some((Value::Object(ObjType::Map), obj))) => Some(obj),
+            _ => None,
+        }
     }
 
     fn str_at(&self, obj: &ObjId, key: &str) -> String {
@@ -152,49 +163,51 @@ impl Store {
 mod tests {
     use super::*;
 
+    fn tmp_store(tag: &str) -> (Store, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("scotia_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("t.automerge");
+        (Store::load(path).unwrap(), dir)
+    }
+
     #[test]
     fn persiste_y_recarga_desde_disco() {
-        let dir = std::env::temp_dir().join(format!("scotia_test_{}", std::process::id()));
-        let path = dir.join("t.automerge");
+        let (mut s, dir) = tmp_store("persist");
+        let path = s.path.clone();
+        s.add_ticket("ana-1", "Error en login", "no deja entrar", "alta", "beto", "ana", 1000)
+            .unwrap();
+        s.add_ticket("ana-2", "Reporte lento", "", "media", "", "ana", 2000)
+            .unwrap();
+        s.save().unwrap();
+        drop(s);
+
+        let recs = Store::load(path).unwrap().list_tickets();
         let _ = std::fs::remove_dir_all(&dir);
 
-        // escribe y guarda
-        {
-            let mut s = Store::load(path.clone()).unwrap();
-            s.add_record("ana-1", "Llamar cliente X", "ana", 1000).unwrap();
-            s.add_record("ana-2", "Revisar reporte", "ana", 2000).unwrap();
-            s.save().unwrap();
-        }
-
-        // recarga en un Store nuevo (simula reinicio de la app)
-        let recs = Store::load(path.clone()).unwrap().list_records();
-        assert_eq!(recs.len(), 2, "deben persistir los 2 records");
+        assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].id, "ana-2", "orden: más reciente primero");
-        assert_eq!(recs[0].title, "Revisar reporte");
-        assert_eq!(recs[1].author, "ana");
-        assert_eq!(recs[1].status, "pendiente");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(recs[1].title, "Error en login");
+        assert_eq!(recs[1].priority, "alta");
+        assert_eq!(recs[1].assignee, "beto");
+        assert_eq!(recs[1].status, "abierto");
     }
 
     #[test]
     fn cambia_estado_y_borra() {
-        let dir = std::env::temp_dir().join(format!("scotia_test2_{}", std::process::id()));
-        let path = dir.join("t.automerge");
+        let (mut s, dir) = tmp_store("estado");
+        s.add_ticket("r-1", "uno", "", "media", "", "ana", 1000).unwrap();
+        s.add_ticket("r-2", "dos", "", "baja", "", "beto", 2000).unwrap();
+
+        s.set_field("r-1", "status", "resuelto").unwrap();
+        s.set_field("r-1", "priority", "alta").unwrap();
+        s.delete_ticket("r-2").unwrap();
+
+        let recs = s.list_tickets();
         let _ = std::fs::remove_dir_all(&dir);
 
-        let mut s = Store::load(path).unwrap();
-        s.add_record("r-1", "tarea uno", "ana", 1000).unwrap();
-        s.add_record("r-2", "tarea dos", "beto", 2000).unwrap();
-
-        s.set_status("r-1", "hecho").unwrap();
-        s.delete_record("r-2").unwrap();
-
-        let recs = s.list_records();
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert_eq!(recs.len(), 1, "quedó 1 tras borrar r-2");
+        assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].id, "r-1");
-        assert_eq!(recs[0].status, "hecho", "el estado se actualizó");
+        assert_eq!(recs[0].status, "resuelto");
+        assert_eq!(recs[0].priority, "alta");
     }
 }
