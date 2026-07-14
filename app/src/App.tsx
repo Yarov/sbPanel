@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
 type Record = {
@@ -66,6 +67,24 @@ function App() {
     setRecords(await invoke<Record[]>("delete_record", { id: r.id }));
   }
 
+  async function exportDoc() {
+    const path = await save({
+      defaultPath: "scotia-seguimiento.scdb",
+      filters: [{ name: "Scotia", extensions: ["scdb"] }],
+    });
+    if (path) await invoke("export_doc", { path });
+  }
+
+  async function importDoc() {
+    const path = await open({
+      multiple: false,
+      filters: [{ name: "Scotia", extensions: ["scdb"] }],
+    });
+    if (typeof path === "string") {
+      setRecords(await invoke<Record[]>("import_doc", { path }));
+    }
+  }
+
   const counts = useMemo(() => {
     const c: { [k: string]: number } = { todos: records.length };
     for (const s of STATUSES) c[s] = records.filter((r) => r.status === s).length;
@@ -83,7 +102,17 @@ function App() {
           {peers > 0 ? `${peers} conectada${peers > 1 ? "s" : ""}` : "sin conexión"}
         </span>
       </div>
-      <p className="subtitle">Seguimiento local-first · {records.length} registros</p>
+      <div className="subtitle-row">
+        <p className="subtitle">Seguimiento local-first · {records.length} registros</p>
+        <div className="toolbar">
+          <button className="ghost" onClick={exportDoc} title="Guardar una copia del seguimiento">
+            Exportar
+          </button>
+          <button className="ghost" onClick={importDoc} title="Importar y fusionar otra copia">
+            Importar
+          </button>
+        </div>
+      </div>
 
       <form className="add-form" onSubmit={add}>
         <input

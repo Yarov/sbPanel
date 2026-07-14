@@ -123,10 +123,33 @@ fn delete_record(
     Ok(records)
 }
 
+/// Exporta la réplica completa a un archivo (sneakernet: copiar por USB a un
+/// peer que nunca coincide conectado).
+#[tauri::command]
+fn export_doc(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let bytes = state.store.lock().unwrap().snapshot();
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
+/// Importa un archivo exportado y lo mergea (nunca pisa datos locales).
+#[tauri::command]
+fn import_doc(state: State<'_, AppState>, path: String) -> Result<Vec<crdt::Record>, String> {
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let records = {
+        let mut store = state.store.lock().unwrap();
+        store.merge_bytes(&bytes).map_err(|e| e.to_string())?;
+        store.save().map_err(|e| e.to_string())?;
+        store.list_records()
+    };
+    let _ = state.broadcast_tx.send(());
+    Ok(records)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // SCOTIA_DATA_DIR permite correr varias instancias en la misma máquina
             // (cada una con su identidad/datos) para probar el P2P localmente.
@@ -182,7 +205,9 @@ pub fn run() {
             list_records,
             add_record,
             update_status,
-            delete_record
+            delete_record,
+            export_doc,
+            import_doc
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
