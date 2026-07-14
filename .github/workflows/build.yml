@@ -47,6 +47,17 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Firma + notarización macOS (opcional) ---
+          # Si estos secrets están vacíos, se compila SIN firmar (PoC).
+          # Cuando tengas cuenta Apple Developer, agrégalos en:
+          # Settings → Secrets and variables → Actions, y saldrá firmado/notarizado
+          # (instalación limpia "arrastrar y listo", funciona offline).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: app
           args: ${{ matrix.args }}
