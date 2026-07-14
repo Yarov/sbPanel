@@ -60,9 +60,39 @@ impl Store {
         tx.put(&obj, "id", id.to_string())?;
         tx.put(&obj, "title", title.to_string())?;
         tx.put(&obj, "author", author.to_string())?;
-        tx.put(&obj, "status", "open".to_string())?;
+        tx.put(&obj, "status", "pendiente".to_string())?;
         tx.put(&obj, "created_at", created_at)?;
         tx.commit();
+        Ok(())
+    }
+
+    /// Devuelve el ObjId de un record por su id (sin mantener el borrow del doc).
+    fn find_obj(&self, id: &str) -> Option<ObjId> {
+        match self.doc.get(ROOT, id) {
+            Ok(Some((Value::Object(ObjType::Map), obj))) => Some(obj),
+            _ => None,
+        }
+    }
+
+    /// Cambia el estado de un record. Merge-safe: distinta llave por record;
+    /// si dos nodos editan el MISMO estado a la vez, automerge resuelve por LWW
+    /// determinista (nadie crashea, ambos convergen al mismo valor).
+    pub fn set_status(&mut self, id: &str, status: &str) -> anyhow::Result<()> {
+        if let Some(obj) = self.find_obj(id) {
+            let mut tx = self.doc.transaction();
+            tx.put(&obj, "status", status.to_string())?;
+            tx.commit();
+        }
+        Ok(())
+    }
+
+    /// Borra un record (elimina su llave en ROOT).
+    pub fn delete_record(&mut self, id: &str) -> anyhow::Result<()> {
+        if self.find_obj(id).is_some() {
+            let mut tx = self.doc.transaction();
+            tx.delete(ROOT, id)?;
+            tx.commit();
+        }
         Ok(())
     }
 
@@ -142,8 +172,29 @@ mod tests {
         assert_eq!(recs[0].id, "ana-2", "orden: más reciente primero");
         assert_eq!(recs[0].title, "Revisar reporte");
         assert_eq!(recs[1].author, "ana");
-        assert_eq!(recs[1].status, "open");
+        assert_eq!(recs[1].status, "pendiente");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cambia_estado_y_borra() {
+        let dir = std::env::temp_dir().join(format!("scotia_test2_{}", std::process::id()));
+        let path = dir.join("t.automerge");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut s = Store::load(path).unwrap();
+        s.add_record("r-1", "tarea uno", "ana", 1000).unwrap();
+        s.add_record("r-2", "tarea dos", "beto", 2000).unwrap();
+
+        s.set_status("r-1", "hecho").unwrap();
+        s.delete_record("r-2").unwrap();
+
+        let recs = s.list_records();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(recs.len(), 1, "quedó 1 tras borrar r-2");
+        assert_eq!(recs[0].id, "r-1");
+        assert_eq!(recs[0].status, "hecho", "el estado se actualizó");
     }
 }

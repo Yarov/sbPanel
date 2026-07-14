@@ -92,6 +92,37 @@ fn add_record(
     Ok(records)
 }
 
+#[tauri::command]
+fn update_status(
+    state: State<'_, AppState>,
+    id: String,
+    status: String,
+) -> Result<Vec<crdt::Record>, String> {
+    let records = {
+        let mut store = state.store.lock().unwrap();
+        store.set_status(&id, &status).map_err(|e| e.to_string())?;
+        store.save().map_err(|e| e.to_string())?;
+        store.list_records()
+    };
+    let _ = state.broadcast_tx.send(());
+    Ok(records)
+}
+
+#[tauri::command]
+fn delete_record(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crdt::Record>, String> {
+    let records = {
+        let mut store = state.store.lock().unwrap();
+        store.delete_record(&id).map_err(|e| e.to_string())?;
+        store.save().map_err(|e| e.to_string())?;
+        store.list_records()
+    };
+    let _ = state.broadcast_tx.send(());
+    Ok(records)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -146,7 +177,13 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![whoami, list_records, add_record])
+        .invoke_handler(tauri::generate_handler![
+            whoami,
+            list_records,
+            add_record,
+            update_status,
+            delete_record
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

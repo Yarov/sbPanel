@@ -114,12 +114,40 @@ button:hover {
   margin: 0;
 }
 
+.filters {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.filter {
+  background: transparent;
+  color: #6b7280;
+  border: 1px solid #e5e7eb;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border-radius: 999px;
+}
+.filter:hover {
+  background: #f3f4f6;
+}
+.filter.active {
+  background: #396cd8;
+  color: #fff;
+  border-color: #396cd8;
+}
+.filter .count {
+  opacity: 0.7;
+  margin-left: 0.2rem;
+}
+
 .record {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: 6.5rem 1fr auto auto;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.75rem 0;
+  padding: 0.6rem 0;
   border-bottom: 1px solid #e5e7eb;
 }
 
@@ -134,17 +162,40 @@ button:hover {
 }
 
 .status {
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
-  padding: 0.15rem 0.5rem;
-  border-radius: 999px;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  text-align: center;
+}
+.status-pendiente {
+  background: #fef3c7;
+  color: #92400e;
+}
+.status-en_progreso {
   background: #dbeafe;
   color: #1e40af;
 }
-.status-open {
+.status-hecho {
   background: #dcfce7;
   color: #166534;
+}
+
+.delete {
+  background: transparent;
+  color: #d1d5db;
+  border: none;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0 0.3rem;
+  cursor: pointer;
+}
+.delete:hover {
+  color: #dc2626;
+  background: transparent;
 }
 
 .empty {
