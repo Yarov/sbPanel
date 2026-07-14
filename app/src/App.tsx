@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
+type Profile = { scotia_id: string; name: string };
+
 type Ticket = {
   id: string;
   title: string;
@@ -12,6 +14,7 @@ type Ticket = {
   assignee: string;
   status: string;
   author: string;
+  author_id: string;
   created_at: number;
 };
 
@@ -31,14 +34,56 @@ const PRIORITY_LABEL: { [k: string]: string } = {
 const next = (arr: readonly string[], v: string) =>
   arr[(arr.indexOf(v) + 1) % arr.length];
 
-function App() {
+// ---------- Pantalla de inicio ----------
+function Login({ onDone }: { onDone: (p: Profile) => void }) {
+  const [scotiaId, setScotiaId] = useState("");
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    try {
+      const p = await invoke<Profile>("set_profile", { scotiaId, name });
+      onDone(p);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  return (
+    <main className="login">
+      <div className="login-card">
+        <h1 className="login-brand">Scotia · Tickets</h1>
+        <p className="login-sub">Ingresa tus datos para comenzar el seguimiento</p>
+        <form onSubmit={submit}>
+          <input
+            value={scotiaId}
+            onChange={(e) => setScotiaId(e.currentTarget.value)}
+            placeholder="ScotiaID"
+            autoFocus
+          />
+          <input
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+            placeholder="Nombre completo"
+          />
+          <button type="submit">Entrar</button>
+        </form>
+        {error && <p className="error">{error}</p>}
+      </div>
+    </main>
+  );
+}
+
+// ---------- App de tickets ----------
+function Tickets({ profile }: { profile: Profile }) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [peers, setPeers] = useState(0);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("media");
   const [assignee, setAssignee] = useState("");
-  const [author, setAuthor] = useState(localStorage.getItem("author") ?? "");
   const [filter, setFilter] = useState<string>("todos");
   const [error, setError] = useState("");
 
@@ -59,15 +104,8 @@ function App() {
     e.preventDefault();
     setError("");
     try {
-      localStorage.setItem("author", author);
       setTickets(
-        await invoke<Ticket[]>("add_ticket", {
-          title,
-          description,
-          priority,
-          assignee,
-          author,
-        })
+        await invoke<Ticket[]>("add_ticket", { title, description, priority, assignee })
       );
       setTitle("");
       setDescription("");
@@ -78,7 +116,7 @@ function App() {
     }
   }
 
-  const setField = async (id: string, field: string, value: string) =>
+  const setFieldValue = async (id: string, field: string, value: string) =>
     setTickets(await invoke<Ticket[]>("update_field", { id, field, value }));
 
   const remove = async (id: string) =>
@@ -115,10 +153,15 @@ function App() {
     <main className="container">
       <div className="header">
         <h1>Scotia · Tickets</h1>
-        <span className={`peers ${peers > 0 ? "online" : ""}`}>
-          <span className="dot" />
-          {peers > 0 ? `${peers} conectada${peers > 1 ? "s" : ""}` : "sin conexión"}
-        </span>
+        <div className="header-right">
+          <span className="user-chip" title={`ScotiaID: ${profile.scotia_id}`}>
+            {profile.name} · {profile.scotia_id}
+          </span>
+          <span className={`peers ${peers > 0 ? "online" : ""}`}>
+            <span className="dot" />
+            {peers > 0 ? `${peers} conectada${peers > 1 ? "s" : ""}` : "sin conexión"}
+          </span>
+        </div>
       </div>
       <div className="subtitle-row">
         <p className="subtitle">Seguimiento local-first · {tickets.length} tickets</p>
@@ -149,13 +192,6 @@ function App() {
             placeholder="Asignado a (opcional)"
           />
           <input
-            value={author}
-            onChange={(e) => setAuthor(e.currentTarget.value)}
-            placeholder="Tu nombre"
-          />
-        </div>
-        <div className="form-row">
-          <input
             value={description}
             onChange={(e) => setDescription(e.currentTarget.value)}
             placeholder="Descripción (opcional)"
@@ -184,7 +220,7 @@ function App() {
             <div className="ticket-main">
               <button
                 className={`status status-${t.status}`}
-                onClick={() => setField(t.id, "status", next(STATUSES, t.status))}
+                onClick={() => setFieldValue(t.id, "status", next(STATUSES, t.status))}
                 title="Clic para cambiar estado"
               >
                 {STATUS_LABEL[t.status] ?? t.status}
@@ -192,7 +228,7 @@ function App() {
               {t.priority && (
                 <button
                   className={`prio prio-${t.priority}`}
-                  onClick={() => setField(t.id, "priority", next(PRIORITIES, t.priority))}
+                  onClick={() => setFieldValue(t.id, "priority", next(PRIORITIES, t.priority))}
                   title="Clic para cambiar prioridad"
                 >
                   {PRIORITY_LABEL[t.priority] ?? t.priority}
@@ -204,7 +240,9 @@ function App() {
             {t.description && <p className="ticket-desc">{t.description}</p>}
             <p className="record-meta">
               {t.assignee ? `→ ${t.assignee} · ` : ""}
-              por {t.author || "anon"} · {new Date(t.created_at).toLocaleString()}
+              por {t.author || "anon"}
+              {t.author_id ? ` (${t.author_id})` : ""} ·{" "}
+              {new Date(t.created_at).toLocaleString()}
             </p>
           </li>
         ))}
@@ -212,6 +250,23 @@ function App() {
       </ul>
     </main>
   );
+}
+
+// ---------- Raíz: decide login vs tickets ----------
+function App() {
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    invoke<Profile | null>("get_profile")
+      .then((p) => setProfile(p))
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return null;
+  if (!profile) return <Login onDone={setProfile} />;
+  return <Tickets profile={profile} />;
 }
 
 export default App;

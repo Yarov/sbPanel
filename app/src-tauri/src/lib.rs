@@ -2,12 +2,20 @@ mod crdt;
 mod p2p;
 
 use libp2p::identity::Keypair;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::mpsc;
+
+/// Perfil del usuario de esta máquina (identidad para el seguimiento).
+#[derive(Clone, Serialize, Deserialize)]
+struct Profile {
+    scotia_id: String,
+    name: String,
+}
 
 /// Puente de eventos del swarm hacia la UI vía Tauri.
 #[derive(Clone)]
@@ -28,6 +36,8 @@ struct AppState {
     /// Señala al swarm que el doc local cambió y debe propagarse.
     broadcast_tx: mpsc::UnboundedSender<()>,
     counter: AtomicU64,
+    profile: Mutex<Option<Profile>>,
+    profile_path: PathBuf,
 }
 
 fn now_millis() -> i64 {
@@ -58,11 +68,34 @@ fn whoami(state: State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
+fn get_profile(state: State<'_, AppState>) -> Option<Profile> {
+    state.profile.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn set_profile(
+    state: State<'_, AppState>,
+    scotia_id: String,
+    name: String,
+) -> Result<Profile, String> {
+    let p = Profile {
+        scotia_id: scotia_id.trim().to_string(),
+        name: name.trim().to_string(),
+    };
+    if p.scotia_id.is_empty() || p.name.is_empty() {
+        return Err("ScotiaID y nombre son obligatorios".into());
+    }
+    let bytes = serde_json::to_vec(&p).map_err(|e| e.to_string())?;
+    std::fs::write(&state.profile_path, bytes).map_err(|e| e.to_string())?;
+    *state.profile.lock().unwrap() = Some(p.clone());
+    Ok(p)
+}
+
+#[tauri::command]
 fn list_tickets(state: State<'_, AppState>) -> Vec<crdt::Ticket> {
     state.store.lock().unwrap().list_tickets()
 }
 
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn add_ticket(
     state: State<'_, AppState>,
@@ -70,13 +103,19 @@ fn add_ticket(
     description: String,
     priority: String,
     assignee: String,
-    author: String,
 ) -> Result<Vec<crdt::Ticket>, String> {
     let title = title.trim().to_string();
     if title.is_empty() {
         return Err("El asunto no puede estar vacío".into());
     }
     let priority = if priority.is_empty() { "media".into() } else { priority };
+
+    // El autor sale del perfil (ScotiaID + nombre), no del formulario.
+    let (author, author_id) = {
+        let guard = state.profile.lock().unwrap();
+        let p = guard.as_ref().ok_or("Configura tu perfil primero")?;
+        (p.name.clone(), p.scotia_id.clone())
+    };
 
     let n = state.counter.fetch_add(1, Ordering::Relaxed);
     // id único global: máquina + tiempo + contador local → sin colisiones entre peers.
@@ -91,7 +130,8 @@ fn add_ticket(
                 description.trim(),
                 &priority,
                 assignee.trim(),
-                author.trim(),
+                &author,
+                &author_id,
                 now_millis(),
             )
             .map_err(|e| e.to_string())?;
@@ -180,6 +220,11 @@ pub fn run() {
             let store = crdt::Store::load(dir.join("scotia-records.automerge"))?;
             let store = Arc::new(Mutex::new(store));
 
+            let profile_path = dir.join("profile.json");
+            let profile: Option<Profile> = std::fs::read(&profile_path)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok());
+
             let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel::<()>();
 
             app.manage(AppState {
@@ -187,6 +232,8 @@ pub fn run() {
                 local_short,
                 broadcast_tx,
                 counter: AtomicU64::new(0),
+                profile: Mutex::new(profile),
+                profile_path,
             });
 
             // El swarm corre en su propio runtime tokio (thread dedicado) para
@@ -216,6 +263,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             whoami,
+            get_profile,
+            set_profile,
             list_tickets,
             add_ticket,
             update_field,

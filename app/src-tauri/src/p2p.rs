@@ -189,7 +189,7 @@ mod tests {
             // A agrega un record y notifica a su swarm para propagar
             {
                 let mut s = store_a.lock().unwrap();
-                s.add_ticket("a-1", "hola-p2p", "", "media", "", "ana", 1000)
+                s.add_ticket("a-1", "hola-p2p", "", "media", "", "ana", "A001", 1000)
                     .unwrap();
                 s.save().unwrap();
             }

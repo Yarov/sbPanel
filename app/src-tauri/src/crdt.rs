@@ -21,6 +21,7 @@ pub struct Ticket {
     pub assignee: String,
     pub status: String, // abierto | en_progreso | resuelto
     pub author: String,
+    pub author_id: String, // ScotiaID de quien lo creó
     pub created_at: i64,
 }
 
@@ -71,6 +72,7 @@ impl Store {
         priority: &str,
         assignee: &str,
         author: &str,
+        author_id: &str,
         created_at: i64,
     ) -> anyhow::Result<()> {
         let mut tx = self.doc.transaction();
@@ -82,6 +84,7 @@ impl Store {
         tx.put(&obj, "assignee", assignee.to_string())?;
         tx.put(&obj, "status", "abierto".to_string())?;
         tx.put(&obj, "author", author.to_string())?;
+        tx.put(&obj, "author_id", author_id.to_string())?;
         tx.put(&obj, "created_at", created_at)?;
         tx.commit();
         Ok(())
@@ -121,6 +124,7 @@ impl Store {
                     assignee: self.str_at(&obj, "assignee"),
                     status: self.str_at(&obj, "status"),
                     author: self.str_at(&obj, "author"),
+                    author_id: self.str_at(&obj, "author_id"),
                     created_at: self.int_at(&obj, "created_at"),
                 });
             }
@@ -174,9 +178,9 @@ mod tests {
     fn persiste_y_recarga_desde_disco() {
         let (mut s, dir) = tmp_store("persist");
         let path = s.path.clone();
-        s.add_ticket("ana-1", "Error en login", "no deja entrar", "alta", "beto", "ana", 1000)
+        s.add_ticket("ana-1", "Error en login", "no deja entrar", "alta", "beto", "ana", "A001", 1000)
             .unwrap();
-        s.add_ticket("ana-2", "Reporte lento", "", "media", "", "ana", 2000)
+        s.add_ticket("ana-2", "Reporte lento", "", "media", "", "ana", "A001", 2000)
             .unwrap();
         s.save().unwrap();
         drop(s);
@@ -195,8 +199,8 @@ mod tests {
     #[test]
     fn cambia_estado_y_borra() {
         let (mut s, dir) = tmp_store("estado");
-        s.add_ticket("r-1", "uno", "", "media", "", "ana", 1000).unwrap();
-        s.add_ticket("r-2", "dos", "", "baja", "", "beto", 2000).unwrap();
+        s.add_ticket("r-1", "uno", "", "media", "", "ana", "A001", 1000).unwrap();
+        s.add_ticket("r-2", "dos", "", "baja", "", "beto", "A002", 2000).unwrap();
 
         s.set_field("r-1", "status", "resuelto").unwrap();
         s.set_field("r-1", "priority", "alta").unwrap();
