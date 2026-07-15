@@ -1,21 +1,16 @@
-# Rust
-target/
-**/target/
-
-# Node
 node_modules/
-**/node_modules/
-app/dist/
+dist/
+dist-ssr/
+*.local
 
-# Datos locales de prueba / identidad
-*.automerge
-identity.key
+# Env (secretos)
+.env
+.env.*
+!.env.example
 
-# OS
+# OS / editor
 .DS_Store
 Thumbs.db
-
-# Editor
 .vscode/*
 !.vscode/extensions.json
 .idea/

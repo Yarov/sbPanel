@@ -1,10 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";
-import "./App.css";
+import { supabase, hasSupabase } from "./supabase";
 
-type Profile = { scotia_id: string; name: string };
+type Profile = { scotiaId: string; name: string };
 
 type Ticket = {
   id: string;
@@ -15,7 +12,7 @@ type Ticket = {
   status: string;
   author: string;
   author_id: string;
-  created_at: number;
+  created_at: string;
 };
 
 const STATUSES = ["abierto", "en_progreso", "resuelto"] as const;
@@ -34,21 +31,41 @@ const PRIORITY_LABEL: { [k: string]: string } = {
 const next = (arr: readonly string[], v: string) =>
   arr[(arr.indexOf(v) + 1) % arr.length];
 
-// ---------- Pantalla de inicio ----------
+const PROFILE_KEY = "scotia_profile";
+
+// ---------- Setup (falta configurar Supabase) ----------
+function Setup() {
+  return (
+    <main className="login">
+      <div className="login-card">
+        <h1 className="login-brand">Scotia · Tickets</h1>
+        <p className="login-sub">Falta conectar Supabase para arrancar.</p>
+        <ol className="setup-steps">
+          <li>Crea un proyecto en <b>supabase.com</b> (gratis).</li>
+          <li>Corre el SQL del <b>README</b> para crear la tabla <code>tickets</code>.</li>
+          <li>Copia <code>.env.example</code> a <code>.env</code> y pega tu URL y anon key.</li>
+          <li>Reinicia <code>npm run dev</code>.</li>
+        </ol>
+      </div>
+    </main>
+  );
+}
+
+// ---------- Login ----------
 function Login({ onDone }: { onDone: (p: Profile) => void }) {
   const [scotiaId, setScotiaId] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
 
-  async function submit(e: React.FormEvent) {
+  function submit(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
-    try {
-      const p = await invoke<Profile>("set_profile", { scotiaId, name });
-      onDone(p);
-    } catch (err) {
-      setError(String(err));
+    if (!scotiaId.trim() || !name.trim()) {
+      setError("ScotiaID y nombre son obligatorios");
+      return;
     }
+    const p = { scotiaId: scotiaId.trim(), name: name.trim() };
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
+    onDone(p);
   }
 
   return (
@@ -77,79 +94,72 @@ function Login({ onDone }: { onDone: (p: Profile) => void }) {
 }
 
 // ---------- App de tickets ----------
-function Tickets({ profile }: { profile: Profile }) {
+function Tickets({ profile, onLogout }: { profile: Profile; onLogout: () => void }) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [peers, setPeers] = useState(0);
+  const [online, setOnline] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("media");
   const [assignee, setAssignee] = useState("");
   const [filter, setFilter] = useState<string>("todos");
   const [error, setError] = useState("");
-  const [myAddrs, setMyAddrs] = useState<string[]>([]);
-  const [dialAddr, setDialAddr] = useState("");
 
-  async function refresh() {
-    setTickets(await invoke<Ticket[]>("list_tickets"));
-  }
-
-  async function connect() {
-    const addr = dialAddr.trim();
-    if (!addr) return;
-    await invoke("dial", { addr });
-    setDialAddr("");
+  async function load() {
+    const { data, error } = await supabase
+      .from("tickets")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) setError(error.message);
+    else setTickets((data ?? []) as Ticket[]);
   }
 
   useEffect(() => {
-    refresh().catch(console.error);
-    const unsubs = [
-      listen<number>("peers-changed", (e) => setPeers(e.payload)),
-      listen("doc-updated", () => refresh()),
-      listen<string>("listen-addr", (e) =>
-        setMyAddrs((prev) => (prev.includes(e.payload) ? prev : [...prev, e.payload]))
-      ),
-    ];
-    return () => unsubs.forEach((p) => p.then((un) => un()));
+    load();
+    // Tiempo real: cualquier cambio en la tabla recarga la lista
+    const channel = supabase
+      .channel("tickets-changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, () => load())
+      .subscribe((status) => setOnline(status === "SUBSCRIBED"));
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
     setError("");
-    try {
-      setTickets(
-        await invoke<Ticket[]>("add_ticket", { title, description, priority, assignee })
-      );
-      setTitle("");
-      setDescription("");
-      setAssignee("");
-      setPriority("media");
-    } catch (err) {
-      setError(String(err));
+    if (!title.trim()) {
+      setError("El asunto no puede estar vacío");
+      return;
     }
+    const { error } = await supabase.from("tickets").insert({
+      title: title.trim(),
+      description: description.trim(),
+      priority,
+      assignee: assignee.trim(),
+      status: "abierto",
+      author: profile.name,
+      author_id: profile.scotiaId,
+    });
+    if (error) {
+      setError(error.message);
+      return;
+    }
+    setTitle("");
+    setDescription("");
+    setAssignee("");
+    setPriority("media");
+    load();
   }
 
-  const setFieldValue = async (id: string, field: string, value: string) =>
-    setTickets(await invoke<Ticket[]>("update_field", { id, field, value }));
-
-  const remove = async (id: string) =>
-    setTickets(await invoke<Ticket[]>("delete_ticket", { id }));
-
-  async function exportDoc() {
-    const path = await save({
-      defaultPath: "scotia-tickets.scdb",
-      filters: [{ name: "Scotia", extensions: ["scdb"] }],
-    });
-    if (path) await invoke("export_doc", { path });
+  async function setFieldValue(id: string, field: string, value: string) {
+    await supabase.from("tickets").update({ [field]: value }).eq("id", id);
+    load();
   }
 
-  async function importDoc() {
-    const path = await open({
-      multiple: false,
-      filters: [{ name: "Scotia", extensions: ["scdb"] }],
-    });
-    if (typeof path === "string") {
-      setTickets(await invoke<Ticket[]>("import_doc", { path }));
-    }
+  async function remove(id: string) {
+    await supabase.from("tickets").delete().eq("id", id);
+    load();
   }
 
   const counts = useMemo(() => {
@@ -166,47 +176,20 @@ function Tickets({ profile }: { profile: Profile }) {
       <div className="header">
         <h1>Scotia · Tickets</h1>
         <div className="header-right">
-          <span className="user-chip" title={`ScotiaID: ${profile.scotia_id}`}>
-            {profile.name} · {profile.scotia_id}
+          <span className="user-chip" title={`ScotiaID: ${profile.scotiaId}`}>
+            {profile.name} · {profile.scotiaId}
           </span>
-          <span className={`peers ${peers > 0 ? "online" : ""}`}>
+          <span className={`peers ${online ? "online" : ""}`}>
             <span className="dot" />
-            {peers > 0 ? `${peers} conectada${peers > 1 ? "s" : ""}` : "sin conexión"}
+            {online ? "en línea" : "conectando…"}
           </span>
         </div>
       </div>
       <div className="subtitle-row">
-        <p className="subtitle">Seguimiento local-first · {tickets.length} tickets</p>
+        <p className="subtitle">Tiempo real · {tickets.length} tickets</p>
         <div className="toolbar">
-          <button className="ghost" onClick={exportDoc}>Exportar</button>
-          <button className="ghost" onClick={importDoc}>Importar</button>
+          <button className="ghost" onClick={onLogout}>Cambiar usuario</button>
         </div>
-      </div>
-
-      <div className="netbar">
-        <span className="net-label">Tu dirección:</span>
-        {myAddrs.length ? (
-          myAddrs.map((a) => (
-            <code
-              key={a}
-              className="net-addr"
-              title="Clic para copiar"
-              onClick={() => navigator.clipboard.writeText(a)}
-            >
-              {a}
-            </code>
-          ))
-        ) : (
-          <span className="net-muted">buscando…</span>
-        )}
-        <input
-          value={dialAddr}
-          onChange={(e) => setDialAddr(e.currentTarget.value)}
-          onKeyDown={(e) => e.key === "Enter" && connect()}
-          placeholder="Conectar a otra máquina (ip:puerto)"
-          className="net-input"
-        />
-        <button className="ghost" onClick={connect}>Conectar</button>
       </div>
 
       <form className="add-form" onSubmit={add}>
@@ -290,21 +273,24 @@ function Tickets({ profile }: { profile: Profile }) {
   );
 }
 
-// ---------- Raíz: decide login vs tickets ----------
+// ---------- Raíz ----------
 function App() {
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [profile, setProfile] = useState<Profile | null>(() => {
+    const raw = localStorage.getItem(PROFILE_KEY);
+    return raw ? (JSON.parse(raw) as Profile) : null;
+  });
 
-  useEffect(() => {
-    invoke<Profile | null>("get_profile")
-      .then((p) => setProfile(p))
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, []);
-
-  if (loading) return null;
+  if (!hasSupabase) return <Setup />;
   if (!profile) return <Login onDone={setProfile} />;
-  return <Tickets profile={profile} />;
+  return (
+    <Tickets
+      profile={profile}
+      onLogout={() => {
+        localStorage.removeItem(PROFILE_KEY);
+        setProfile(null);
+      }}
+    />
+  );
 }
 
 export default App;

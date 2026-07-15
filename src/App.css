@@ -24,7 +24,6 @@
 * {
   box-sizing: border-box;
 }
-
 body {
   margin: 0;
   background: var(--bg);
@@ -50,6 +49,24 @@ h1 {
   letter-spacing: -0.02em;
   padding-left: 0.75rem;
   border-left: 4px solid var(--red);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.user-chip {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  white-space: nowrap;
 }
 
 .peers {
@@ -136,7 +153,6 @@ button {
 button:hover {
   background: var(--red-hover);
 }
-
 .ghost {
   background: transparent;
   color: var(--text);
@@ -149,40 +165,6 @@ button:hover {
   background: var(--surface-2);
   border-color: var(--red);
   color: var(--red-hover);
-}
-
-/* ---------- barra de red ---------- */
-.netbar {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  margin-bottom: 1rem;
-  padding: 0.6rem 0.8rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  font-size: 0.82rem;
-}
-.net-label {
-  color: var(--muted);
-  font-weight: 600;
-}
-.net-addr {
-  background: var(--surface-3);
-  color: #60a5fa;
-  padding: 0.2rem 0.5rem;
-  border-radius: 6px;
-  cursor: pointer;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-}
-.net-muted {
-  color: var(--muted);
-}
-.net-input {
-  flex: 1;
-  min-width: 180px;
-  margin-left: auto;
 }
 
 /* ---------- form ---------- */
@@ -207,7 +189,6 @@ button:hover {
 .form-row > button[type="submit"] {
   white-space: nowrap;
 }
-
 .error {
   color: #f87171;
   font-size: 0.88rem;
@@ -290,7 +271,7 @@ button:hover {
   cursor: pointer;
   white-space: nowrap;
   color: #fff;
-  background: var(--surface-3); /* fallback neutral (estados legacy) */
+  background: var(--surface-3);
 }
 .status-abierto {
   background: rgba(245, 158, 11, 0.18);
@@ -338,26 +319,7 @@ button:hover {
   list-style: none;
 }
 
-/* ---------- header derecha / usuario ---------- */
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-.user-chip {
-  font-size: 0.76rem;
-  font-weight: 600;
-  color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  padding: 0.3rem 0.7rem;
-  border-radius: 999px;
-  white-space: nowrap;
-}
-
-/* ---------- pantalla de inicio ---------- */
+/* ---------- login / setup ---------- */
 .login {
   min-height: 100vh;
   display: flex;
@@ -367,7 +329,7 @@ button:hover {
 }
 .login-card {
   width: 100%;
-  max-width: 380px;
+  max-width: 400px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-top: 3px solid var(--red);
@@ -397,4 +359,17 @@ button:hover {
 }
 .login button {
   margin-top: 0.3rem;
+}
+.setup-steps {
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.7;
+  padding-left: 1.2rem;
+  margin: 0;
+}
+.setup-steps code {
+  background: var(--surface-3);
+  padding: 0.1rem 0.35rem;
+  border-radius: 5px;
+  font-size: 0.85em;
 }

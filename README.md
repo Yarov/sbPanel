@@ -1,51 +1,61 @@
-# Scotia Dashboard
+# Scotia · Tickets
 
-Dashboard de seguimiento **local-first + P2P** para red interna aislada (sin internet, sin servidor).
-Cada máquina tiene una réplica completa; se sincronizan **directo entre sí por la LAN** cuando coinciden
-conectadas. App de escritorio con **Tauri v2** (Rust) + **React**.
+PWA de seguimiento de tickets con **Supabase** como backend (DB + tiempo real, sin API propia que alojar).
+Tema Scotia dark. Escala a muchos usuarios; todos le pegan al mismo proyecto Supabase por HTTPS.
 
-## Cómo funciona
+## Stack
 
-- **CRDT (automerge):** merge sin conflictos, nadie pisa los datos de nadie.
-- **P2P (libp2p):** descubrimiento por **mDNS** + propagación por **gossipsub**, sin punto central.
-- **Local-first:** cada peer persiste su réplica en disco; funciona offline y sincroniza al reconectar.
+- **PWA**: React + Vite (instalable, tema oscuro)
+- **Backend**: Supabase (Postgres + Realtime), el navegador le pega directo
+- **Login**: ScotiaID + nombre (local, estampa cada ticket con quién lo creó)
 
-> Límite conocido: si dos peers **nunca** coinciden conectados, no se sincronizan hasta que coincidan
-> (se mitiga con propagación gossip A→B→C y, a futuro, export/import manual).
+## Puesta en marcha
 
-## Estructura
+### 1. Crear proyecto Supabase
+En [supabase.com](https://supabase.com) crea un proyecto (free tier).
+
+### 2. Crear la tabla `tickets`
+En Supabase → **SQL Editor**, corre:
+
+```sql
+create table tickets (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  description text default '',
+  priority text default 'media',
+  assignee text default '',
+  status text default 'abierto',
+  author text default '',
+  author_id text default '',
+  created_at timestamptz default now()
+);
+
+-- PoC: acceso con la anon key (sin login de Supabase). Ajustar para producción.
+alter table tickets enable row level security;
+create policy "acceso_poc" on tickets for all using (true) with check (true);
+
+-- Tiempo real
+alter publication supabase_realtime add table tickets;
+```
+
+### 3. Configurar credenciales
+Copia `.env.example` a `.env` y pega tu **Project URL** y **anon key**
+(Supabase → Project Settings → API):
 
 ```
-app/      # La app real (Tauri v2 + React-TS)
-spike/    # Prototipo de de-risk P2P puro (Fase 0), CLI en Rust
+VITE_SUPABASE_URL=https://TU-PROYECTO.supabase.co
+VITE_SUPABASE_ANON_KEY=tu-anon-key
 ```
 
-## Desarrollo
+### 4. Correr
 
 ```bash
-cd app
 npm install
-npm run tauri dev
+npm run dev
 ```
 
-Probar dos instancias en la misma máquina (P2P local):
+## Notas
 
-```bash
-# ventana A: npm run tauri dev
-# ventana B:
-SCOTIA_DATA_DIR=/tmp/scotia-B app/src-tauri/target/debug/app
-```
-
-## Tests
-
-```bash
-cd app/src-tauri && cargo test
-```
-
-Incluye `sincroniza_dos_peers_en_lan`: levanta dos swarms reales y valida que un registro creado en A
-llega a B por mDNS + gossipsub + merge.
-
-## Builds (CI)
-
-GitHub Actions (`.github/workflows/build.yml`) compila para **macOS (universal)** y **Windows** y sube los
-instaladores como artefactos. Sin firma de código (PoC).
+- La política RLS de arriba es **abierta para la PoC** (cualquiera con la anon key lee/escribe).
+  Para producción se restringe con Supabase Auth + políticas por usuario.
+- El login (ScotiaID + nombre) se guarda en el navegador y estampa el autor de cada ticket.
