@@ -394,7 +394,7 @@ button:hover {
 .tabs button:hover { color: var(--text); background: transparent; }
 .tabs button.active { color: var(--text); border-bottom-color: var(--red); }
 
-.container { max-width: 1000px; }
+.container { max-width: none; padding: 1.75rem clamp(1rem, 3.5vw, 3rem) 3rem; }
 
 /* ---------- KPIs ---------- */
 .kpis { display: flex; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
@@ -495,7 +495,7 @@ button:hover {
 /* ---------- gráficas ---------- */
 .charts {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 1rem;
   margin-bottom: 1.1rem;
 }
@@ -517,3 +517,26 @@ button:hover {
 .clip { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pager { display: flex; align-items: center; justify-content: center; gap: 1rem; margin-top: 1rem; color: var(--muted); font-size: 0.85rem; }
 .pager button:disabled { opacity: 0.4; cursor: default; }
+
+/* ---------- íconos ---------- */
+.i-red { color: var(--red-hover); }
+.i-blue { color: #60a5fa; }
+.i-green { color: #34d399; }
+.i-amber { color: #fbbf24; }
+.i-muted { color: var(--muted); }
+svg { flex-shrink: 0; }
+.spin { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.dz-busy { display: inline-flex; align-items: center; gap: 0.5rem; }
+.ok-line, .error { display: flex; align-items: center; gap: 0.4rem; }
+.btn-i { display: inline-flex; align-items: center; gap: 0.3rem; }
+.insight-h { display: flex; align-items: center; gap: 0.45rem; }
+.akind { display: inline-flex; align-items: center; gap: 0.3rem; }
+.search-wrap {
+  display: flex; align-items: center; gap: 0.5rem;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 0 0.7rem; color: var(--muted);
+}
+.search-wrap:focus-within { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-soft); }
+.search-wrap input { border: none; background: transparent; flex: 1; padding: 0.6em 0; min-width: 0; }
+.search-wrap input:focus { box-shadow: none; }

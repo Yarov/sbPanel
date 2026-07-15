@@ -1,8 +1,21 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase, hasSupabase } from "./supabase";
 import { parseCsv, toObjects } from "./lib/csv";
 import { ingest, SOURCES, SourceId, IngestResult } from "./lib/ingest";
 import { Donut, BarsH } from "./Charts";
+import {
+  AlertOctagon, Layers, RotateCcw, ShieldAlert, ShieldX, CircleAlert,
+  Loader2, Search, CheckCircle2, AlertTriangle, X, ChevronLeft, ChevronRight,
+} from "lucide-react";
+
+function AlertIcon({ kind }: { kind: string }) {
+  const p = { size: 15 };
+  if (kind === "kev") return <ShieldAlert {...p} className="i-red" />;
+  if (kind === "appsec_critical") return <AlertOctagon {...p} className="i-red" />;
+  if (kind === "resurfaced") return <RotateCcw {...p} className="i-red" />;
+  if (kind === "policy") return <ShieldX {...p} className="i-blue" />;
+  return <CircleAlert {...p} className="i-amber" />;
+}
 
 type Profile = { scotiaId: string; name: string };
 type Finding = {
@@ -13,13 +26,11 @@ type Finding = {
 };
 type Alert = { id: string; kind: string; message: string; severity: string | null; acknowledged: boolean; created_at: string };
 type AppScan = { source: string; project_name: string; epm: string | null; policy_status: string | null; risk_level: string | null; crit: number; high: number; med: number; low: number };
-type Row = { label: string; abiertos?: number; total?: number; criticos?: number };
-
 const PROFILE_KEY = "scotia_profile";
 const SEVS = ["Critical", "High", "Medium", "Low"];
 const STATUSES = ["open", "resurfaced", "fixed"];
 const sevClass = (s?: string | null) => `sev sev-${(s || "").toLowerCase()}`;
-const toData = (rows: Row[]) => rows.map((r) => ({ label: r.label, value: r.abiertos ?? r.total ?? 0 }));
+const NO = { "(sin área)": "", "(sin plataforma)": "", "(sin responsable)": "" } as Record<string, string>;
 
 // ---------- Login ----------
 function Login({ onDone }: { onDone: (p: Profile) => void }) {
@@ -103,15 +114,17 @@ function Upload({ onDone }: { onDone: () => void }) {
       </div>
       <label className={`dropzone ${busy ? "busy" : ""}`}>
         <input type="file" accept=".csv,text/csv" onChange={onFile} disabled={busy} hidden />
-        {busy ? (prog
-          ? `⏳ Procesando ${prog.rows.toLocaleString()} filas · lote ${prog.done}/${prog.total} · ${pct}% · ${secs}s`
-          : `⏳ ${phase}`) : `Suelta o elige el CSV de ${SOURCES.find((s) => s.id === source)!.label}`}
+        {busy ? (
+          <span className="dz-busy"><Loader2 size={16} className="spin" />
+            {prog ? `Procesando ${prog.rows.toLocaleString()} filas · lote ${prog.done}/${prog.total} · ${pct}% · ${secs}s` : phase}
+          </span>
+        ) : `Suelta o elige el CSV de ${SOURCES.find((s) => s.id === source)!.label}`}
       </label>
       {busy && prog && <div className="progress"><div className="progress-bar" style={{ width: `${Math.max(pct, 3)}%` }} /></div>}
-      {err && <p className="error">⚠️ {err}</p>}
+      {err && <p className="error"><AlertTriangle size={15} /> {err}</p>}
       {res && (
         <div className="ingest-result">
-          <p>✅ Procesadas <b>{res.rows.toLocaleString()}</b> filas.</p>
+          <p className="ok-line"><CheckCircle2 size={16} className="i-green" /> Procesadas <b>{res.rows.toLocaleString()}</b> filas.</p>
           <div className="chips">
             {Object.entries(res.summary).map(([k, v]) => <span key={k} className={`chip chip-${k}`}>{k}: <b>{v}</b></span>)}
           </div>
@@ -121,39 +134,41 @@ function Upload({ onDone }: { onDone: () => void }) {
   );
 }
 
-// ---------- Dashboard (métricas + gráficas) ----------
+// ---------- Dashboard (métricas + gráficas filtrables) ----------
+const EMPTY_M = { kpi: {}, by_severity: [], by_area: [], by_plataforma: [], by_responsable: [] };
 function Dashboard() {
-  const [kpi, setKpi] = useState<any>({});
-  const [sev, setSev] = useState<Row[]>([]);
-  const [area, setArea] = useState<Row[]>([]);
-  const [plat, setPlat] = useState<Row[]>([]);
-  const [resp, setResp] = useState<Row[]>([]);
+  const [m, setM] = useState<any>(EMPTY_M);
   const [debt, setDebt] = useState<any[]>([]);
   const [cross, setCross] = useState<any[]>([]);
   const [scans, setScans] = useState<AppScan[]>([]);
+  const [f, setF] = useState({ area: "", plataforma: "", responsable: "", severity: "", source: "" });
+  const [opts, setOpts] = useState<{ area: string[]; plataforma: string[]; responsable: string[] }>({ area: [], plataforma: [], responsable: [] });
+  const fRef = useRef(f); fRef.current = f;
+
+  useEffect(() => {
+    supabase.from("v_filter_options").select("*").then((r) => {
+      const o = { area: [] as string[], plataforma: [] as string[], responsable: [] as string[] };
+      for (const x of (r.data ?? []) as any[]) (o as any)[x.kind]?.push(x.label);
+      setOpts(o);
+    });
+  }, []);
 
   async function load() {
-    const [k, sv, ar, pl, rs, d, c, sc] = await Promise.all([
-      supabase.from("v_kpi").select("*").maybeSingle(),
-      supabase.from("v_by_severity").select("*"),
-      supabase.from("v_by_area").select("*").limit(8),
-      supabase.from("v_by_plataforma").select("*").limit(8),
-      supabase.from("v_by_responsable").select("*").limit(8),
+    const g = fRef.current;
+    const { data } = await supabase.rpc("dashboard_metrics", {
+      p_area: g.area || null, p_plataforma: g.plataforma || null, p_responsable: g.responsable || null,
+      p_severity: g.severity || null, p_source: g.source || null,
+    });
+    setM(data ?? EMPTY_M);
+    const [d, c, sc] = await Promise.all([
       supabase.from("v_hidden_debt").select("asset,title,true_age_days").order("true_age_days", { ascending: false }).limit(8),
       supabase.from("v_cross_layer").select("*").order("capas", { ascending: false }).limit(8),
       supabase.from("app_scans").select("*").order("crit", { ascending: false }).limit(30),
     ]);
-    setKpi(k.data ?? {});
-    setSev((sv.data ?? []) as Row[]);
-    setArea((ar.data ?? []) as Row[]);
-    setPlat((pl.data ?? []) as Row[]);
-    setResp((rs.data ?? []) as Row[]);
-    setDebt(d.data ?? []);
-    setCross(c.data ?? []);
-    setScans((sc.data ?? []) as AppScan[]);
+    setDebt(d.data ?? []); setCross(c.data ?? []); setScans((sc.data ?? []) as AppScan[]);
   }
+  useEffect(() => { load(); }, [f]);
   useEffect(() => {
-    load();
     const ch = supabase.channel("dash")
       .on("postgres_changes", { event: "*", schema: "public", table: "findings" }, () => load())
       .on("postgres_changes", { event: "*", schema: "public", table: "app_scans" }, () => load())
@@ -161,8 +176,31 @@ function Dashboard() {
     return () => { supabase.removeChannel(ch); };
   }, []);
 
+  const kpi = m.kpi ?? {};
+  const set = (k: string, v: string) => setF((p) => ({ ...p, [k]: v }));
+  const active = Object.values(f).some(Boolean);
+
   return (
     <div>
+      <div className="filters-bar">
+        <select value={f.area} onChange={(e) => set("area", e.currentTarget.value)}>
+          <option value="">Todas las áreas</option>{opts.area.map((a) => <option key={a}>{a}</option>)}
+        </select>
+        <select value={f.plataforma} onChange={(e) => set("plataforma", e.currentTarget.value)}>
+          <option value="">Toda plataforma</option>{opts.plataforma.map((a) => <option key={a}>{a}</option>)}
+        </select>
+        <select value={f.responsable} onChange={(e) => set("responsable", e.currentTarget.value)}>
+          <option value="">Todo responsable</option>{opts.responsable.map((a) => <option key={a}>{a}</option>)}
+        </select>
+        <select value={f.severity} onChange={(e) => set("severity", e.currentTarget.value)}>
+          <option value="">Severidad</option>{SEVS.map((s) => <option key={s}>{s}</option>)}
+        </select>
+        <select value={f.source} onChange={(e) => set("source", e.currentTarget.value)}>
+          <option value="">Fuente</option>{SOURCES.map((s) => <option key={s.id} value={s.id}>{s.id}</option>)}
+        </select>
+        {active && <button className="ghost btn-i" onClick={() => setF({ area: "", plataforma: "", responsable: "", severity: "", source: "" })}><X size={14} /> Limpiar</button>}
+      </div>
+
       <div className="kpis">
         <Kpi n={kpi.total ?? 0} label="Hallazgos" />
         <Kpi n={kpi.abiertos ?? 0} label="Abiertos" />
@@ -175,29 +213,29 @@ function Dashboard() {
       <div className="charts">
         <div className="chart-card">
           <h3>Por severidad</h3>
-          {sev.length ? <Donut data={toData(sev)} /> : <Empty />}
+          {m.by_severity?.length ? <Donut data={m.by_severity} onSelect={(l) => set("severity", l)} /> : <Empty />}
         </div>
         <div className="chart-card">
           <h3>Por Área</h3>
-          {area.length ? <BarsH data={toData(area)} /> : <Empty />}
+          {m.by_area?.length ? <BarsH data={m.by_area} onSelect={(l) => set("area", NO[l] ?? l)} /> : <Empty />}
         </div>
         <div className="chart-card">
           <h3>Por Plataforma</h3>
-          {plat.length ? <BarsH data={toData(plat)} color="#60a5fa" /> : <Empty />}
+          {m.by_plataforma?.length ? <BarsH data={m.by_plataforma} color="#60a5fa" onSelect={(l) => set("plataforma", NO[l] ?? l)} /> : <Empty />}
         </div>
         <div className="chart-card">
           <h3>Top Responsables</h3>
-          {resp.length ? <BarsH data={toData(resp)} color="#fbbf24" /> : <Empty />}
+          {m.by_responsable?.length ? <BarsH data={m.by_responsable} color="#fbbf24" onSelect={(l) => set("responsable", NO[l] ?? l)} /> : <Empty />}
         </div>
       </div>
 
       {debt.length > 0 && (
-        <Insight title="🔴 Deuda oculta (KRI dice IN_TIME pero llevan años)" items={debt.map((d: any) => ({
+        <Insight icon={<AlertOctagon size={15} className="i-red" />} title="Deuda oculta (KRI dice IN_TIME pero llevan años)" items={debt.map((d: any) => ({
           key: d.asset + d.title, main: d.title, meta: `${d.asset} · ${d.true_age_days} días reales`,
         }))} />
       )}
       {cross.length > 0 && (
-        <Insight title="🔀 Riesgo cruzado (riesgo en varias capas)" items={cross.map((c: any) => ({
+        <Insight icon={<Layers size={15} className="i-blue" />} title="Riesgo cruzado (riesgo en varias capas)" items={cross.map((c: any) => ({
           key: c.epm, main: `EPM ${c.epm}`, meta: `${c.capas} capas · ${c.fuentes}`,
         }))} />
       )}
@@ -263,8 +301,11 @@ function Hallazgos() {
   return (
     <div className="panel">
       <div className="filters-bar">
-        <input className="search grow" value={q} onChange={(e) => { setQ(e.currentTarget.value); setPage(0); }}
-          placeholder="🔎 Buscar activo, título, CVE, EPM, responsable…" />
+        <div className="search-wrap grow">
+          <Search size={16} className="i-muted" />
+          <input value={q} onChange={(e) => { setQ(e.currentTarget.value); setPage(0); }}
+            placeholder="Buscar activo, título, CVE, EPM, responsable…" />
+        </div>
         <select value={f.sev} onChange={(e) => set("sev", e.currentTarget.value)}>
           <option value="">Severidad</option>{SEVS.map((s) => <option key={s}>{s}</option>)}
         </select>
@@ -301,9 +342,9 @@ function Hallazgos() {
       </div>
       {pages > 1 && (
         <div className="pager">
-          <button className="ghost" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>← Anterior</button>
+          <button className="ghost btn-i" disabled={page === 0} onClick={() => setPage((p) => p - 1)}><ChevronLeft size={15} /> Anterior</button>
           <span>Página {page + 1} de {pages}</span>
-          <button className="ghost" disabled={page + 1 >= pages} onClick={() => setPage((p) => p + 1)}>Siguiente →</button>
+          <button className="ghost btn-i" disabled={page + 1 >= pages} onClick={() => setPage((p) => p + 1)}>Siguiente <ChevronRight size={15} /></button>
         </div>
       )}
     </div>
@@ -329,7 +370,7 @@ function Alerts() {
       <ul className="alerts">
         {alerts.map((a) => (
           <li key={a.id} className={`alert ${a.acknowledged ? "ack" : ""}`}>
-            <span className={`akind akind-${a.kind}`}>{a.kind}</span>
+            <span className={`akind akind-${a.kind}`}><AlertIcon kind={a.kind} />{a.kind}</span>
             <span className="amsg">{a.message}</span>
             {!a.acknowledged && <button className="ghost" onClick={() => ack(a.id)}>Atender</button>}
           </li>
@@ -343,10 +384,10 @@ function Alerts() {
 function Kpi({ n, label, tone }: { n: number; label: string; tone?: string }) {
   return <div className={`kpi ${tone ? "kpi-" + tone : ""}`}><div className="kpi-n">{Number(n).toLocaleString()}</div><div className="kpi-l">{label}</div></div>;
 }
-function Insight({ title, items }: { title: string; items: { key: string; main: string; meta: string }[] }) {
+function Insight({ icon, title, items }: { icon?: React.ReactNode; title: string; items: { key: string; main: string; meta: string }[] }) {
   return (
     <div className="insight">
-      <div className="insight-h">{title} <span className="insight-c">{items.length}</span></div>
+      <div className="insight-h">{icon}<span>{title}</span> <span className="insight-c">{items.length}</span></div>
       <ul>{items.slice(0, 8).map((i) => <li key={i.key}><span className="clip">{i.main}</span><span className="insight-m">{i.meta}</span></li>)}</ul>
     </div>
   );

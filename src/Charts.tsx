@@ -16,8 +16,9 @@ const tooltipStyle = {
 };
 
 export type Datum = { label: string; value: number };
+type Sel = { onSelect?: (label: string) => void };
 
-export function Donut({ data }: { data: Datum[] }) {
+export function Donut({ data, onSelect }: { data: Datum[] } & Sel) {
   const total = data.reduce((a, d) => a + d.value, 0);
   return (
     <ResponsiveContainer width="100%" height={220}>
@@ -25,7 +26,8 @@ export function Donut({ data }: { data: Datum[] }) {
         <Pie data={data} dataKey="value" nameKey="label" cx="50%" cy="50%"
           innerRadius={55} outerRadius={85} paddingAngle={2} stroke="none">
           {data.map((d, i) => (
-            <Cell key={i} fill={SEV_COLORS[d.label] ?? PALETTE[i % PALETTE.length]} />
+            <Cell key={i} fill={SEV_COLORS[d.label] ?? PALETTE[i % PALETTE.length]}
+              cursor={onSelect ? "pointer" : "default"} onClick={() => onSelect?.(d.label)} />
           ))}
         </Pie>
         <Tooltip contentStyle={tooltipStyle} />
@@ -36,7 +38,7 @@ export function Donut({ data }: { data: Datum[] }) {
   );
 }
 
-export function BarsH({ data, color = RED }: { data: Datum[]; color?: string }) {
+export function BarsH({ data, color = RED, onSelect }: { data: Datum[]; color?: string } & Sel) {
   const h = Math.max(150, data.length * 34 + 10);
   return (
     <ResponsiveContainer width="100%" height={h}>
@@ -45,7 +47,9 @@ export function BarsH({ data, color = RED }: { data: Datum[]; color?: string }) 
         <YAxis type="category" dataKey="label" width={150}
           tick={{ fill: "#9ca3af", fontSize: 11 }} tickLine={false} axisLine={false} />
         <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
-        <Bar dataKey="value" fill={color} radius={[0, 5, 5, 0]} barSize={18}>
+        <Bar dataKey="value" fill={color} radius={[0, 5, 5, 0]} barSize={18}
+          cursor={onSelect ? "pointer" : "default"}
+          onClick={(e: any) => onSelect?.(e?.label ?? e?.payload?.label)}>
           <LabelList dataKey="value" position="right" fill="#9ca3af" fontSize={11} />
         </Bar>
       </BarChart>

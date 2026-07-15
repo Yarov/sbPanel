@@ -484,3 +484,65 @@ create or replace view v_by_status as
   select status label, count(*) total from findings group by 1;
 
 grant select on v_kpi, v_by_area, v_by_plataforma, v_by_responsable, v_by_severity, v_by_status to anon, authenticated;
+-- Métricas del dashboard, agregadas EN LA BASE y filtrables por área/plataforma/
+-- responsable/severidad/fuente/estado. Devuelve todo en un JSON.
+create or replace function dashboard_metrics(
+  p_area text default null,
+  p_plataforma text default null,
+  p_responsable text default null,
+  p_severity text default null,
+  p_source text default null,
+  p_status text default null
+) returns jsonb
+language sql security invoker stable as $$
+  with f as (
+    select * from findings
+    where (p_area is null or area = p_area)
+      and (p_plataforma is null or plataforma = p_plataforma)
+      and (p_responsable is null or responsable = p_responsable)
+      and (p_severity is null or severity_scanner = p_severity)
+      and (p_source is null or source = p_source)
+      and (p_status is null or status = p_status)
+  )
+  select jsonb_build_object(
+    'kpi', (
+      select jsonb_build_object(
+        'total', count(*),
+        'abiertos', count(*) filter (where status <> 'fixed'),
+        'criticos', count(*) filter (where lower(severity_scanner)='critical' and status <> 'fixed'),
+        'resurfaced', count(*) filter (where status='resurfaced'),
+        'areas', count(distinct nullif(area,'')),
+        'responsables', count(distinct nullif(responsable,''))
+      ) from f
+    ),
+    'by_severity', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,'value',value)),'[]'::jsonb)
+      from (select coalesce(nullif(severity_scanner,''),'(sin sev)') label,
+              count(*) filter (where status<>'fixed') value from f group by 1) t
+    ),
+    'by_area', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,'value',value) order by value desc),'[]'::jsonb)
+      from (select coalesce(nullif(area,''),'(sin área)') label,
+              count(*) filter (where status<>'fixed') value from f group by 1 order by value desc limit 8) t
+    ),
+    'by_plataforma', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,'value',value) order by value desc),'[]'::jsonb)
+      from (select coalesce(nullif(plataforma,''),'(sin plataforma)') label,
+              count(*) filter (where status<>'fixed') value from f group by 1 order by value desc limit 8) t
+    ),
+    'by_responsable', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,'value',value) order by value desc),'[]'::jsonb)
+      from (select coalesce(nullif(responsable,''),'(sin responsable)') label,
+              count(*) filter (where status<>'fixed') value from f group by 1 order by value desc limit 8) t
+    )
+  );
+$$;
+
+grant execute on function dashboard_metrics(text,text,text,text,text,text) to anon, authenticated;
+
+-- catálogos para los dropdowns (labels distintos, sobre TODO el universo)
+create or replace view v_filter_options as
+  select 'area' kind, coalesce(nullif(area,''),'(sin área)') label from findings
+  union select 'plataforma', coalesce(nullif(plataforma,''),'(sin plataforma)') from findings
+  union select 'responsable', coalesce(nullif(responsable,''),'(sin responsable)') from findings;
+grant select on v_filter_options to anon, authenticated;
