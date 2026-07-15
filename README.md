@@ -1,61 +1,49 @@
-# Scotia · Tickets
+# Scotia · Reporter
 
-PWA de seguimiento de tickets con **Supabase** como backend (DB + tiempo real, sin API propia que alojar).
-Tema Scotia dark. Escala a muchos usuarios; todos le pegan al mismo proyecto Supabase por HTTPS.
+PWA de **gestión de vulnerabilidades** que unifica 4 escáneres (Tenable, Blackduck, Checkmarx,
+WebInspect), con **ingesta por CSV con conciliación automática**, dashboard, insights y alertas.
+Backend en **Supabase** (Postgres + Realtime). Tema Scotia dark.
 
-## Stack
+## Qué hace
 
-- **PWA**: React + Vite (instalable, tema oscuro)
-- **Backend**: Supabase (Postgres + Realtime), el navegador le pega directo
-- **Login**: ScotiaID + nombre (local, estampa cada ticket con quién lo creó)
+- **Carga de CSV** por fuente. Conciliación automática al subir:
+  - nueva vulnerabilidad → se agrega (alerta si Crítica)
+  - ya no aparece en el escaneo → se **cierra**
+  - estaba cerrada y **reaparece** → se **reabre + alerta** ("salió de nuevo")
+- **Motor de insights** automatizado:
+  - 🔴 Deuda oculta (KRI dice IN_TIME pero la vuln lleva años)
+  - ♻️ Resurfaced · ⚖️ Recast sospechoso · ⏰ Vencidos reales
+- **Dashboard**: KPIs, scorecard por aplicación (EPM), tabla de hallazgos con búsqueda.
+- **Alertas** en tiempo real.
+- **Login** ScotiaID + nombre (estampa autoría).
 
-## Puesta en marcha
-
-### 1. Crear proyecto Supabase
-En [supabase.com](https://supabase.com) crea un proyecto (free tier).
-
-### 2. Crear la tabla `tickets`
-En Supabase → **SQL Editor**, corre:
-
-```sql
-create table tickets (
-  id uuid primary key default gen_random_uuid(),
-  title text not null,
-  description text default '',
-  priority text default 'media',
-  assignee text default '',
-  status text default 'abierto',
-  author text default '',
-  author_id text default '',
-  created_at timestamptz default now()
-);
-
--- PoC: acceso con la anon key (sin login de Supabase). Ajustar para producción.
-alter table tickets enable row level security;
-create policy "acceso_poc" on tickets for all using (true) with check (true);
-
--- Tiempo real
-alter publication supabase_realtime add table tickets;
-```
-
-### 3. Configurar credenciales
-Copia `.env.example` a `.env` y pega tu **Project URL** y **anon key**
-(Supabase → Project Settings → API):
+## Arquitectura
 
 ```
-VITE_SUPABASE_URL=https://TU-PROYECTO.supabase.co
-VITE_SUPABASE_ANON_KEY=tu-anon-key
+  PWA (React/Vite)  ──►  Supabase (Postgres + Realtime)
+   carga CSV, dashboard      ingest_findings() concilia + genera alertas
+                             vistas v_hidden_debt / v_resurfaced / v_recast
 ```
 
-### 4. Correr
+- Grano **por hallazgo** (Tenable) → tabla `findings` con máquina de estados.
+- Grano **por app** (Blackduck/Checkmarx/WebInspect, rollups) → tabla `app_scans`.
+- El **EPM** es la llave que une todo. `project_epm_map` enriquece Blackduck (que no trae EPM).
+
+## Base de datos
+
+El esquema + el motor de ingesta están en [`supabase/schema.sql`](supabase/schema.sql).
+Aplicar en Supabase → SQL Editor.
+
+## Desarrollo
 
 ```bash
 npm install
+cp .env.example .env   # pon VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY
 npm run dev
 ```
 
-## Notas
+## ⚠️ Seguridad
 
-- La política RLS de arriba es **abierta para la PoC** (cualquiera con la anon key lee/escribe).
-  Para producción se restringe con Supabase Auth + políticas por usuario.
-- El login (ScotiaID + nombre) se guarda en el navegador y estampa el autor de cada ticket.
+Es data **sensible** (vulns sin parchar de PROD). La RLS de la PoC está **abierta** y el hosting
+en GitHub Pages es **público** — solo para PoC con datos ficticios. Para producción: hosting interno,
+Supabase Auth + RLS por rol, y visto bueno de seguridad.

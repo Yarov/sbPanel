@@ -14,3 +14,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# Datos de muestra / CSVs (no subir data real de vulns)
+samples/
