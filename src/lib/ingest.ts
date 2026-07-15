@@ -44,6 +44,9 @@ export async function ingest(
       remaining_days: num(o["Remaining days"]),
       sla_days: 120,
       owner: o["Responsable de remediación (implementación / ejecución)"] || o["Responsable"] || null,
+      area: o["Area"] || o["Área"] || null,
+      plataforma: o["Plataforma"] || null,
+      responsable: o["Responsable"] || o["Responsable de remediación (implementación / ejecución)"] || null,
       detail: { port: o["port"], protocol: o["protocol"], pais: o["Pais"], lob: o["Lob (Entity)"] },
     }));
 

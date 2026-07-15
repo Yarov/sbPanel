@@ -491,3 +491,29 @@ button:hover {
 .akind-appsec_critical { background: var(--red-soft); color: #ff5c63; }
 .akind-policy { background: rgba(59,130,246,0.18); color: #60a5fa; }
 .amsg { flex: 1; font-size: 0.88rem; }
+
+/* ---------- gráficas ---------- */
+.charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1.1rem;
+}
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1rem 1.1rem;
+  min-width: 0;
+}
+.chart-card h3 { margin: 0 0 0.6rem; font-size: 0.95rem; }
+@media (max-width: 760px) { .charts { grid-template-columns: 1fr; } }
+
+/* ---------- filtros / búsqueda / paginación ---------- */
+.filters-bar { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.filters-bar .grow { flex: 1; min-width: 220px; }
+.filters-bar select { min-width: 110px; }
+.tbl-wrap { overflow-x: auto; }
+.clip { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pager { display: flex; align-items: center; justify-content: center; gap: 1rem; margin-top: 1rem; color: var(--muted); font-size: 0.85rem; }
+.pager button:disabled { opacity: 0.4; cursor: default; }
