@@ -465,7 +465,15 @@ button:hover {
   transition: border-color 0.15s, color 0.15s;
 }
 .dropzone:hover { border-color: var(--red); color: var(--text); }
-.dropzone.busy { opacity: 0.6; cursor: wait; }
+.dropzone.busy { cursor: wait; border-color: var(--red); color: var(--text); }
+.progress {
+  height: 8px; background: var(--surface-3); border-radius: 999px;
+  overflow: hidden; margin-top: 0.7rem;
+}
+.progress-bar {
+  height: 100%; background: linear-gradient(90deg, var(--red), var(--red-hover));
+  border-radius: 999px; transition: width 0.3s ease;
+}
 .ingest-result { margin-top: 1rem; }
 .chips { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
 .chip { background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 0.3rem 0.7rem; font-size: 0.82rem; }

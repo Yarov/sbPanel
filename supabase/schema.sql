@@ -313,3 +313,69 @@ begin
 
   return jsonb_build_object('new',v_new,'updated',v_updated,'resurfaced',v_resurfaced,'fixed',v_fixed,'errores',v_errors);
 end $$;
+-- ingest_findings por lotes: p_close_missing controla el cierre de ausentes.
+-- El cliente manda N lotes con p_close_missing=false y una llamada final con true.
+drop function if exists ingest_findings(text, jsonb, timestamptz);
+
+create or replace function ingest_findings(
+  p_source text,
+  p_rows jsonb,
+  p_scan_time timestamptz default now(),
+  p_close_missing boolean default true
+) returns jsonb
+language plpgsql security invoker as $$
+declare
+  v_new int:=0; v_updated int:=0; v_resurfaced int:=0; v_fixed int:=0; v_errors int:=0;
+  r jsonb; v_key text; v_status text; v_title text; v_epm text; v_sev text;
+  v_first timestamptz; v_cvss numeric; v_vpr numeric; v_rem int; v_sla int;
+begin
+  for r in select value from jsonb_array_elements(coalesce(p_rows,'[]'::jsonb)) as value loop
+    begin
+      v_key := nullif(r->>'finding_key','');
+      if v_key is null then v_errors:=v_errors+1; continue; end if;
+      v_sev := r->>'severity_scanner';
+      begin v_first := (r->>'first_observed')::timestamptz; exception when others then v_first := p_scan_time; end;
+      begin v_cvss := (r->>'cvss')::numeric;  exception when others then v_cvss := null; end;
+      begin v_vpr  := (r->>'vpr')::numeric;   exception when others then v_vpr  := null; end;
+      begin v_rem  := (r->>'remaining_days')::int; exception when others then v_rem := null; end;
+      begin v_sla  := coalesce((r->>'sla_days')::int,120); exception when others then v_sla := 120; end;
+
+      select status, title, epm into v_status, v_title, v_epm from findings where finding_key=v_key;
+
+      if not found then
+        insert into findings(finding_key,source,epm,asset,title,cve,cwe,severity_scanner,severity_scotia,
+          cvss,vpr,status,first_observed,last_seen,owner,kri_status,sla_days,remaining_days,detail)
+        values(v_key,p_source,r->>'epm',r->>'asset',coalesce(r->>'title','(sin título)'),r->>'cve',r->>'cwe',
+          v_sev,r->>'severity_scotia',v_cvss,v_vpr,'open',coalesce(v_first,p_scan_time),p_scan_time,
+          r->>'owner',r->>'kri_status',v_sla,v_rem,coalesce(r->'detail','{}'::jsonb));
+        v_new:=v_new+1;
+        if lower(coalesce(v_sev,'')) in ('critical','high') then
+          insert into alerts(finding_key,epm,kind,message,severity)
+          values(v_key,r->>'epm','new_finding','Nuevo hallazgo '||v_sev||': '||coalesce(r->>'title',''),v_sev);
+        end if;
+      elsif v_status='fixed' then
+        update findings set status='resurfaced',resurfaced_date=p_scan_time,last_seen=p_scan_time,updated_at=now()
+          where finding_key=v_key;
+        v_resurfaced:=v_resurfaced+1;
+        insert into alerts(finding_key,epm,kind,message,severity)
+        values(v_key,v_epm,'resurfaced','REABIERTA (había sido cerrada y salió de nuevo): '||coalesce(v_title,''),v_sev);
+      else
+        update findings set last_seen=p_scan_time,severity_scanner=v_sev,updated_at=now() where finding_key=v_key;
+        v_updated:=v_updated+1;
+      end if;
+    exception when others then
+      v_errors := v_errors + 1;
+    end;
+  end loop;
+
+  -- cierre de ausentes SOLO en la llamada final (snapshot completo ya cargado)
+  if p_close_missing then
+    update findings set status='fixed',last_fixed=p_scan_time,updated_at=now()
+      where source=p_source and status in ('open','resurfaced') and last_seen < p_scan_time;
+    get diagnostics v_fixed = row_count;
+  end if;
+
+  return jsonb_build_object('new',v_new,'updated',v_updated,'resurfaced',v_resurfaced,'fixed',v_fixed,'errores',v_errors);
+end $$;
+
+grant execute on function ingest_findings(text, jsonb, timestamptz, boolean) to anon, authenticated;

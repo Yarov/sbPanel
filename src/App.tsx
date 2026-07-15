@@ -52,24 +52,45 @@ function Upload({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [res, setRes] = useState<(IngestResult & { rows: number }) | null>(null);
+  const [phase, setPhase] = useState("");
+  const [prog, setProg] = useState<{ done: number; total: number; rows: number } | null>(null);
+  const [t0, setT0] = useState(0);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    const id = setInterval(() => setTick((t) => t + 1), 500);
+    return () => clearInterval(id);
+  }, [busy]);
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setBusy(true); setErr(""); setRes(null);
+    setBusy(true); setErr(""); setRes(null); setProg(null);
+    setT0(performance.now());
     try {
-      const objs = toObjects(parseCsv(await file.text()));
+      setPhase("Leyendo archivo…");
+      const text = await file.text();
+      setPhase("Parseando CSV…");
+      const objs = toObjects(parseCsv(text));
       if (!objs.length) throw new Error("El CSV no tiene filas de datos.");
-      const r = await ingest(source, objs);
+      setPhase(`Cargando ${objs.length.toLocaleString()} filas…`);
+      const r = await ingest(source, objs, (done, total) =>
+        setProg({ done, total, rows: objs.length })
+      );
       setRes({ ...r, rows: objs.length });
       onDone();
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
       setBusy(false);
+      setProg(null);
+      setPhase("");
       e.target.value = "";
     }
   }
+
+  const pct = prog && prog.total ? Math.round((prog.done / prog.total) * 100) : 0;
+  const secs = busy && t0 ? ((performance.now() - t0) / 1000).toFixed(0) : "0";
 
   return (
     <div className="panel">
@@ -78,19 +99,26 @@ function Upload({ onDone }: { onDone: () => void }) {
         cierra las que ya no aparecen, <b>reabre y alerta</b> las que resurgen.</p>
       <div className="sources">
         {SOURCES.map((s) => (
-          <button key={s.id} className={`src ${source === s.id ? "active" : ""}`} onClick={() => setSource(s.id)}>
+          <button key={s.id} className={`src ${source === s.id ? "active" : ""}`} onClick={() => !busy && setSource(s.id)}>
             {s.label}<span className="src-grain">{s.grain}</span>
           </button>
         ))}
       </div>
       <label className={`dropzone ${busy ? "busy" : ""}`}>
         <input type="file" accept=".csv,text/csv" onChange={onFile} disabled={busy} hidden />
-        {busy ? "Procesando…" : `Suelta o elige el CSV de ${SOURCES.find((s) => s.id === source)!.label}`}
+        {busy
+          ? (prog
+              ? `⏳ Procesando ${prog.rows.toLocaleString()} filas · lote ${prog.done}/${prog.total} · ${pct}% · ${secs}s`
+              : `⏳ ${phase}`)
+          : `Suelta o elige el CSV de ${SOURCES.find((s) => s.id === source)!.label}`}
       </label>
-      {err && <p className="error">{err}</p>}
+      {busy && prog && (
+        <div className="progress"><div className="progress-bar" style={{ width: `${Math.max(pct, 3)}%` }} /></div>
+      )}
+      {err && <p className="error">⚠️ {err}</p>}
       {res && (
         <div className="ingest-result">
-          <p>✅ Procesadas <b>{res.rows}</b> filas.</p>
+          <p>✅ Procesadas <b>{res.rows.toLocaleString()}</b> filas.</p>
           <div className="chips">
             {Object.entries(res.summary).map(([k, v]) => (
               <span key={k} className={`chip chip-${k}`}>{k}: <b>{v}</b></span>
