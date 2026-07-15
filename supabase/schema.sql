@@ -202,3 +202,54 @@ exception when duplicate_object then null; end $$;
 do $$ begin
   alter publication supabase_realtime add table alerts;
 exception when duplicate_object then null; end $$;
+-- ==========================================================================
+-- Análisis automático de AppSec al cargar (Blackduck/Checkmarx/WebInspect)
+-- ==========================================================================
+create or replace function trg_app_scan_analyze() returns trigger
+language plpgsql security invoker as $$
+declare v_key text := new.source || ':' || new.project_name;
+begin
+  -- KEV / Log4Shell (política de Blackduck menciona Log4j)
+  if new.detail->>'policy' ilike '%log4j%' then
+    if not exists (select 1 from alerts where finding_key=v_key and kind='kev' and not acknowledged) then
+      insert into alerts(finding_key, epm, kind, message, severity)
+      values (v_key, new.epm, 'kev',
+        '💥 KEV/Log4Shell en '||new.project_name||' ('||new.source||')', 'Critical');
+    end if;
+  end if;
+  -- Críticos de seguridad
+  if coalesce(new.crit,0) > 0 then
+    if not exists (select 1 from alerts where finding_key=v_key and kind='appsec_critical' and not acknowledged) then
+      insert into alerts(finding_key, epm, kind, message, severity)
+      values (v_key, new.epm, 'appsec_critical',
+        new.crit||' crítico(s) en '||new.project_name||' ('||new.source||')', 'Critical');
+    end if;
+  end if;
+  -- Política en violación
+  if new.policy_status ilike '%violation%' then
+    if not exists (select 1 from alerts where finding_key=v_key and kind='policy' and not acknowledged) then
+      insert into alerts(finding_key, epm, kind, message, severity)
+      values (v_key, new.epm, 'policy',
+        'Política en violación: '||new.project_name, 'High');
+    end if;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists app_scan_analyze on app_scans;
+create trigger app_scan_analyze after insert or update on app_scans
+  for each row execute function trg_app_scan_analyze();
+
+-- ==========================================================================
+-- Riesgo cruzado: apps (EPM) con riesgo Alto/Crítico en >= 2 capas
+-- ==========================================================================
+create or replace view v_cross_layer as
+with risk as (
+  select epm, 'tenable' as source from findings
+    where epm is not null and status <> 'fixed'
+      and lower(severity_scanner) in ('critical','high')
+  union
+  select epm, source from app_scans where epm is not null and (coalesce(crit,0)>0 or coalesce(high,0)>0)
+)
+select epm, count(distinct source) as capas, string_agg(distinct source, ', ') as fuentes
+from risk group by epm having count(distinct source) >= 2;

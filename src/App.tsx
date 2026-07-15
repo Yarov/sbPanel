@@ -13,6 +13,7 @@ type Finding = {
 type Alert = { id: string; kind: string; message: string; severity: string | null; acknowledged: boolean; created_at: string };
 type AppScan = { source: string; project_name: string; epm: string | null; risk_level: string | null; policy_status: string | null; crit: number; high: number; med: number; low: number };
 type Debt = { asset: string; title: string; true_age_days: number };
+type Cross = { epm: string; capas: number; fuentes: string };
 
 const PROFILE_KEY = "scotia_profile";
 const sevClass = (s?: string | null) => `sev sev-${(s || "").toLowerCase()}`;
@@ -106,17 +107,20 @@ function Dashboard() {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [scans, setScans] = useState<AppScan[]>([]);
   const [debt, setDebt] = useState<Debt[]>([]);
+  const [cross, setCross] = useState<Cross[]>([]);
   const [q, setQ] = useState("");
 
   async function load() {
-    const [f, s, d] = await Promise.all([
+    const [f, s, d, c] = await Promise.all([
       supabase.from("findings").select("*").order("last_seen", { ascending: false }).limit(500),
       supabase.from("app_scans").select("*").order("crit", { ascending: false }).limit(200),
       supabase.from("v_hidden_debt").select("asset,title,true_age_days").order("true_age_days", { ascending: false }),
+      supabase.from("v_cross_layer").select("*").order("capas", { ascending: false }),
     ]);
     setFindings((f.data ?? []) as Finding[]);
     setScans((s.data ?? []) as AppScan[]);
     setDebt((d.data ?? []) as Debt[]);
+    setCross((c.data ?? []) as Cross[]);
   }
   useEffect(() => {
     load();
@@ -173,6 +177,11 @@ function Dashboard() {
       {recast.length > 0 && (
         <Insight title="⚖️ Recast sospechoso (scanner alto → Scotia Low)" items={recast.map((f) => ({
           key: f.id, main: f.title, meta: `${f.asset} · ${f.severity_scanner} → ${f.severity_scotia}`,
+        }))} />
+      )}
+      {cross.length > 0 && (
+        <Insight title="🔀 Riesgo cruzado (riesgo en varias capas)" items={cross.map((c) => ({
+          key: c.epm, main: `EPM ${c.epm}`, meta: `${c.capas} capas · ${c.fuentes}`,
         }))} />
       )}
 
