@@ -3,6 +3,15 @@ name: deploy-pages
 # Compila la PWA y la publica en GitHub Pages en cada push a main.
 # Las credenciales de Supabase se inyectan desde los Secrets del repo.
 
+# Publica en GitHub Pages (sitio PÚBLICO) en cada push a main.
+#
+# El sitio es público, así que quien lo abra ve el login. Lo que hay atrás lo
+# protege la RLS: `anon` no alcanza ninguna tabla ni función, y todo exige sesión
+# (supabase/cerrar_puerta.sql + los grants a `authenticated` de schema.sql).
+# La anon key va en el bundle a propósito: solo sirve para llegar a /auth/v1/token.
+#
+# Si alguna vez alguien vuelve a darle permisos a `anon`, este deploy convierte
+# eso en una fuga pública. Ese es el invariante que hay que cuidar.
 on:
   push:
     branches: [main]
