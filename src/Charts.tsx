@@ -64,12 +64,17 @@ export function StackH({ data, onSelect }: { data: StackDatum[] } & Sel) {
   const full = new Map(data.map((d) => [corta(d.label), d.label]));
   const chart = data.map((d) => ({ ...d, label: corta(d.label) }));
   const pick = (l?: string) => l && onSelect?.(full.get(l) ?? l);
+  // El total va en el tick del eje, no en un LabelList sobre la última barra:
+  // Recharts no dibuja la etiqueta si ese segmento vale 0, así que el total solo
+  // aparecía en las filas que casualmente tenían un Low.
+  const totales = new Map(chart.map((d) => [d.label, d.value]));
   return (
     <ResponsiveContainer width="100%" height={h}>
-      <BarChart data={chart} layout="vertical" margin={{ left: 6, right: 34, top: 4, bottom: 4 }}>
+      <BarChart data={chart} layout="vertical" margin={{ left: 6, right: 16, top: 4, bottom: 4 }}>
         <XAxis type="number" hide />
-        <YAxis type="category" dataKey="label" width={150}
-          tick={{ fill: "#9ca3af", fontSize: 11 }} tickLine={false} axisLine={false} />
+        <YAxis type="category" dataKey="label" width={182}
+          tick={{ fill: "#9ca3af", fontSize: 11 }} tickLine={false} axisLine={false}
+          tickFormatter={(l) => `${l}  (${totales.get(String(l)) ?? 0})`} />
         <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgba(255,255,255,0.04)" }}
           labelFormatter={(l) => full.get(String(l)) ?? String(l)} />
         <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} iconSize={9} />
@@ -77,11 +82,7 @@ export function StackH({ data, onSelect }: { data: StackDatum[] } & Sel) {
           <Bar key={s} dataKey={s} stackId="sev" fill={SEV_COLORS[s]} barSize={18}
             radius={i === SEVS.length - 1 ? [0, 5, 5, 0] : undefined}
             cursor={onSelect ? "pointer" : "default"}
-            onClick={(e: any) => pick(e?.label ?? e?.payload?.label)}>
-            {i === SEVS.length - 1 && (
-              <LabelList dataKey="value" position="right" fill="#9ca3af" fontSize={11} />
-            )}
-          </Bar>
+            onClick={(e: any) => pick(e?.label ?? e?.payload?.label)} />
         ))}
       </BarChart>
     </ResponsiveContainer>

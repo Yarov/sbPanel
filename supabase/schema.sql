@@ -464,6 +464,36 @@ create table if not exists silver.project_epm_map (
   updated_at  timestamptz default now()
 );
 
+-- Migra el AppSec que ya estaba cargado en public.app_scans. Sin esto, el modelo
+-- nuevo arrancaría con silver.app_scans vacía y esos escaneos se perderían sin
+-- que nadie se entere.
+do $$
+begin
+  if exists (select 1 from information_schema.tables
+              where table_schema='public' and table_name='app_scans') then
+    insert into silver.app_scans (source, project_name, project_key, epm, risk_level,
+                                  policy_status, crit, high, med, low, last_scan, updated_at)
+    select source, project_name, project_key, epm, risk_level, policy_status,
+           coalesce(crit,0), coalesce(high,0), coalesce(med,0), coalesce(low,0),
+           last_scan, coalesce(updated_at, now())
+    from public.app_scans
+    on conflict (source, project_name) do nothing;
+    drop table public.app_scans cascade;
+  end if;
+end $$;
+
+-- Checkmarx trae EPM y PROJECT KEY: puede enseñarle el mapeo a Blackduck, que
+-- solo trae PROJECT KEY. Así se llena sola, sin catálogo manual.
+insert into silver.project_epm_map (project_key, epm, aprendido_de)
+select distinct on (project_key) project_key, epm, 'checkmarx'
+from silver.app_scans
+where source='checkmarx' and project_key is not null and epm is not null
+on conflict (project_key) do update set epm=excluded.epm, updated_at=now();
+
+update silver.app_scans a set epm = m.epm
+from silver.project_epm_map m
+where a.epm is null and a.project_key = m.project_key;
+
 -- ==========================================================================
 -- public.* — la capa de lectura. PostgREST solo expone public, así que el
 -- modelo vive en silver y el front lee estas vistas.
