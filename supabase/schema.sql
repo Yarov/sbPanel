@@ -151,25 +151,33 @@ end $$;
 -- ==========================================================================
 -- Vistas de insights (el análisis automatizado)
 -- ==========================================================================
-create or replace view v_hidden_debt as
+-- Este archivo se aplica completo y de corrido, así que tiene que ser
+-- idempotente. Más abajo (v2) estas vistas se redefinen con más columnas, y
+-- `create or replace view` no puede quitarlas: sin el drop, re-aplicar truena.
+drop view if exists v_hidden_debt cascade;
+drop view if exists v_resurfaced cascade;
+drop view if exists v_recast cascade;
+drop view if exists v_overdue cascade;
+
+create view v_hidden_debt as
   select finding_key, epm, asset, title, severity_scanner, first_observed, sla_days,
     (current_date - first_observed::date) as true_age_days, kri_status
   from findings
   where status in ('open','resurfaced') and kri_status = 'IN_TIME'
     and (current_date - first_observed::date) > coalesce(sla_days,120);
 
-create or replace view v_resurfaced as
+create view v_resurfaced as
   select finding_key, epm, asset, title, severity_scanner, resurfaced_date
   from findings where status='resurfaced';
 
-create or replace view v_recast as
+create view v_recast as
   select finding_key, epm, asset, title, severity_scanner, severity_scotia
   from findings
   where status in ('open','resurfaced')
     and lower(severity_scanner) in ('critical','high')
     and lower(severity_scotia) = 'low';
 
-create or replace view v_overdue as
+create view v_overdue as
   select finding_key, epm, asset, title, severity_scanner, first_observed,
     (current_date - first_observed::date) as true_age_days
   from findings
@@ -546,3 +554,389 @@ create or replace view v_filter_options as
   union select 'plataforma', coalesce(nullif(plataforma,''),'(sin plataforma)') from findings
   union select 'responsable', coalesce(nullif(responsable,''),'(sin responsable)') from findings;
 grant select on v_filter_options to anon, authenticated;
+
+-- ==========================================================================
+-- v2 — Jerarquía organizacional (IT VP / IT Manager) como eje del filtrado
+-- El export real de Tenable trae 91 columnas e incluye el árbol org completo:
+-- IT SVP -> IT VP -> IT Manager -> Contact App -> EPM / App Name.
+-- ==========================================================================
+alter table findings add column if not exists it_svp text;
+alter table findings add column if not exists it_vp text;
+alter table findings add column if not exists it_manager text;
+alter table findings add column if not exists contact_app text;
+alter table findings add column if not exists app_name text;
+alter table findings add column if not exists tier text;
+alter table findings add column if not exists cia boolean;
+alter table findings add column if not exists managed_by text;
+alter table findings add column if not exists pais text;
+alter table findings add column if not exists lob text;
+alter table findings add column if not exists exposed_internet boolean;
+alter table findings add column if not exists mx_regulatory boolean;
+alter table findings add column if not exists state_scanner text;
+alter table findings add column if not exists recast_reason text;
+alter table findings add column if not exists plugin_id text;
+alter table findings add column if not exists age_in_days int;
+
+create index if not exists idx_findings_it_vp on findings(it_vp);
+create index if not exists idx_findings_it_manager on findings(it_manager);
+create index if not exists idx_findings_app_name on findings(app_name);
+create index if not exists idx_findings_kri on findings(kri_status);
+-- el dashboard siempre filtra por "no cerrados": índice parcial
+create index if not exists idx_findings_abiertos on findings(status) where status <> 'fixed';
+
+-- ==========================================================================
+-- ingest_findings v2 — confía en el `state` de Tenable en vez de re-derivarlo.
+-- Tenable ya calcula NEW/ACTIVE/RESURFACED/FIXED + first_observed/last_fixed/
+-- resurfaced_date. Re-derivarlo nos daba números que no cuadraban contra Tenable.
+-- ==========================================================================
+create or replace function ingest_findings(
+  p_source text, p_rows jsonb, p_scan_time timestamptz default now(), p_close_missing boolean default true
+) returns jsonb
+language plpgsql security invoker as $$
+declare
+  v_new int:=0; v_updated int:=0; v_resurfaced int:=0; v_fixed int:=0; v_errors int:=0;
+  r jsonb; v_key text; v_prev text; v_title text; v_epm text; v_sev text; v_st text;
+  v_first timestamptz; v_cvss numeric; v_vpr numeric; v_rem int; v_sla int;
+begin
+  for r in select value from jsonb_array_elements(coalesce(p_rows,'[]'::jsonb)) as value loop
+    begin
+      v_key := nullif(r->>'finding_key',''); if v_key is null then v_errors:=v_errors+1; continue; end if;
+      v_sev := r->>'severity_scanner';
+      v_st  := coalesce(r->>'status','open');
+
+      begin v_first := (r->>'first_observed')::timestamptz; exception when others then v_first := p_scan_time; end;
+      begin v_cvss := (r->>'cvss')::numeric;  exception when others then v_cvss := null; end;
+      begin v_vpr  := (r->>'vpr')::numeric;   exception when others then v_vpr  := null; end;
+      begin v_rem  := (r->>'remaining_days')::int; exception when others then v_rem := null; end;
+      -- sin SLA declarado por el scanner caemos a 120, pero solo como último recurso
+      begin v_sla  := coalesce((r->>'sla_days')::int,120); exception when others then v_sla := 120; end;
+
+      select status, title, epm into v_prev, v_title, v_epm from findings where finding_key=v_key;
+
+      if not found then
+        insert into findings(finding_key,source,epm,asset,title,cve,plugin_id,severity_scanner,severity_scotia,
+          cvss,vpr,status,state_scanner,first_observed,last_seen,last_fixed,resurfaced_date,recast_reason,
+          age_in_days,owner,kri_status,sla_days,remaining_days,area,plataforma,responsable,
+          it_svp,it_vp,it_manager,contact_app,app_name,tier,cia,managed_by,pais,lob,
+          exposed_internet,mx_regulatory,detail)
+        values(v_key,p_source,r->>'epm',r->>'asset',coalesce(r->>'title','(sin título)'),r->>'cve',r->>'plugin_id',
+          v_sev,r->>'severity_scotia',v_cvss,v_vpr,v_st,r->>'state_scanner',
+          coalesce(v_first,p_scan_time),p_scan_time,
+          nullif(r->>'last_fixed','')::timestamptz, nullif(r->>'resurfaced_date','')::timestamptz,
+          r->>'recast_reason',(r->>'age_in_days')::numeric::int,
+          r->>'owner',r->>'kri_status',v_sla,v_rem,r->>'area',r->>'plataforma',r->>'responsable',
+          r->>'it_svp',r->>'it_vp',r->>'it_manager',r->>'contact_app',r->>'app_name',r->>'tier',
+          (r->>'cia')::boolean,r->>'managed_by',r->>'pais',r->>'lob',
+          (r->>'exposed_internet')::boolean,(r->>'mx_regulatory')::boolean,
+          coalesce(r->'detail','{}'::jsonb));
+        v_new:=v_new+1;
+        if v_st='resurfaced' then v_resurfaced:=v_resurfaced+1; end if;
+        if lower(coalesce(v_sev,'')) in ('critical','high') then
+          insert into alerts(finding_key,epm,kind,message,severity)
+          values(v_key,r->>'epm','new_finding','Nuevo hallazgo '||v_sev||': '||coalesce(r->>'title',''),v_sev);
+        end if;
+
+      else
+        update findings set
+          status=v_st, state_scanner=r->>'state_scanner', last_seen=p_scan_time,
+          severity_scanner=v_sev, severity_scotia=r->>'severity_scotia', cvss=v_cvss, vpr=v_vpr,
+          last_fixed=nullif(r->>'last_fixed','')::timestamptz,
+          resurfaced_date=nullif(r->>'resurfaced_date','')::timestamptz,
+          recast_reason=r->>'recast_reason', age_in_days=(r->>'age_in_days')::numeric::int,
+          kri_status=r->>'kri_status', sla_days=v_sla, remaining_days=v_rem,
+          area=r->>'area', plataforma=r->>'plataforma', responsable=r->>'responsable',
+          it_svp=r->>'it_svp', it_vp=r->>'it_vp', it_manager=r->>'it_manager',
+          contact_app=r->>'contact_app', app_name=r->>'app_name', tier=r->>'tier',
+          cia=(r->>'cia')::boolean, managed_by=r->>'managed_by', pais=r->>'pais', lob=r->>'lob',
+          exposed_internet=(r->>'exposed_internet')::boolean,
+          mx_regulatory=(r->>'mx_regulatory')::boolean,
+          updated_at=now()
+        where finding_key=v_key;
+
+        -- alerta solo en la TRANSICIÓN a resurfaced, no en cada carga
+        if v_st='resurfaced' and v_prev is distinct from 'resurfaced' then
+          v_resurfaced:=v_resurfaced+1;
+          insert into alerts(finding_key,epm,kind,message,severity)
+          values(v_key,v_epm,'resurfaced','REABIERTA (Tenable la marcó RESURFACED): '||coalesce(v_title,''),v_sev);
+        else
+          v_updated:=v_updated+1;
+        end if;
+      end if;
+    exception when others then v_errors := v_errors + 1; end;
+  end loop;
+
+  if p_close_missing then
+    update findings set status='fixed',last_fixed=coalesce(last_fixed,p_scan_time),updated_at=now()
+      where source=p_source and status in ('open','resurfaced') and last_seen < p_scan_time;
+    get diagnostics v_fixed = row_count;
+  end if;
+  return jsonb_build_object('new',v_new,'updated',v_updated,'resurfaced',v_resurfaced,'fixed',v_fixed,'errores',v_errors);
+end $$;
+grant execute on function ingest_findings(text, jsonb, timestamptz, boolean) to anon, authenticated;
+
+-- ==========================================================================
+-- Árbol organizacional: alimenta los filtros en cascada VP -> Manager -> App.
+-- Son pocas filas (distintos), el front cascadea en cliente sin round-trips.
+-- ==========================================================================
+create or replace view v_org_tree as
+  select
+    coalesce(nullif(it_svp,''),    '(sin SVP)')     as it_svp,
+    coalesce(nullif(it_vp,''),     '(sin VP)')      as it_vp,
+    coalesce(nullif(it_manager,''),'(sin manager)') as it_manager,
+    coalesce(nullif(epm,''),       '(sin EPM)')     as epm,
+    coalesce(nullif(app_name,''),  '(sin app)')     as app_name,
+    count(*) filter (where status <> 'fixed') as abiertos,
+    count(*) filter (where lower(severity_scanner) in ('critical','high') and status <> 'fixed') as criticos
+  from findings
+  group by 1,2,3,4,5;
+grant select on v_org_tree to anon, authenticated;
+
+-- ==========================================================================
+-- dashboard_metrics v2 — eje IT VP -> IT Manager -> App.
+-- Area/Plataforma/Responsable siguen disponibles como filtros secundarios,
+-- pero en data real vienen con placeholders ("APP Owner", "TBD") y no sirven
+-- como eje principal.
+-- ==========================================================================
+drop function if exists dashboard_metrics(text,text,text,text,text,text);
+
+create or replace function dashboard_metrics(
+  p_it_vp text default null,
+  p_it_manager text default null,
+  p_app text default null,
+  p_severity text default null,
+  p_kri text default null,
+  p_status text default null,
+  p_source text default null,
+  p_area text default null,
+  p_plataforma text default null,
+  p_responsable text default null,
+  p_exposed boolean default null
+) returns jsonb
+language sql security invoker stable as $$
+  with f as (
+    select *, greatest(current_date - first_observed::date, 0) as edad
+    from findings
+    where (p_it_vp      is null or coalesce(nullif(it_vp,''),'(sin VP)') = p_it_vp)
+      and (p_it_manager is null or coalesce(nullif(it_manager,''),'(sin manager)') = p_it_manager)
+      and (p_app        is null or coalesce(nullif(app_name,''),'(sin app)') = p_app)
+      -- El dropdown ofrece "(sin X)" como opción, así que el filtro tiene que
+      -- machear igual que la etiqueta que muestra la gráfica.
+      and (p_severity   is null or coalesce(nullif(severity_scanner,''),'(sin sev)') = p_severity)
+      and (p_kri        is null or coalesce(nullif(kri_status,''),'(sin KRI)') = p_kri)
+      and (p_status     is null or status = p_status)
+      and (p_source     is null or source = p_source)
+      and (p_area       is null or coalesce(nullif(area,''),'(sin área)') = p_area)
+      and (p_plataforma is null or coalesce(nullif(plataforma,''),'(sin plataforma)') = p_plataforma)
+      and (p_responsable is null or coalesce(nullif(responsable,''),'(sin responsable)') = p_responsable)
+      and (p_exposed    is null or exposed_internet = p_exposed)
+  ), abiertos as (select * from f where status <> 'fixed')
+  select jsonb_build_object(
+    'kpi', (select jsonb_build_object(
+        'total',      (select count(*) from f),
+        'abiertos',   (select count(*) from abiertos),
+        'criticos',   (select count(*) from abiertos where lower(severity_scanner)='critical'),
+        'resurfaced', (select count(*) from f where status='resurfaced'),
+        'fuera_sla',  (select count(*) from abiertos where kri_status is not null and kri_status <> 'IN_TIME'),
+        'expuestos',  (select count(*) from abiertos where exposed_internet),
+        'vps',        (select count(distinct nullif(it_vp,'')) from abiertos),
+        'managers',   (select count(distinct nullif(it_manager,'')) from abiertos),
+        'apps',       (select count(distinct nullif(app_name,'')) from abiertos)
+      )),
+    'by_severity', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,'value',value)),'[]'::jsonb)
+      from (select coalesce(nullif(severity_scanner,''),'(sin sev)') label, count(*) value
+            from abiertos group by 1) t
+    ),
+    'by_kri', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,'value',value)),'[]'::jsonb)
+      from (select coalesce(nullif(kri_status,''),'(sin KRI)') label, count(*) value
+            from abiertos group by 1) t
+    ),
+    -- apilados por severidad: un VP con 200 Low no es un VP con 200 Critical
+    'by_it_vp', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,
+        'Critical',c,'High',h,'Medium',m,'Low',l,'value',c+h+m+l) order by c+h+m+l desc),'[]'::jsonb)
+      from (select coalesce(nullif(it_vp,''),'(sin VP)') label,
+              count(*) filter (where lower(severity_scanner)='critical') c,
+              count(*) filter (where lower(severity_scanner)='high')     h,
+              count(*) filter (where lower(severity_scanner)='medium')   m,
+              count(*) filter (where lower(severity_scanner)='low')      l
+            from abiertos group by 1 order by count(*) desc limit 10) t
+    ),
+    'by_it_manager', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,
+        'Critical',c,'High',h,'Medium',m,'Low',l,'value',c+h+m+l) order by c+h+m+l desc),'[]'::jsonb)
+      from (select coalesce(nullif(it_manager,''),'(sin manager)') label,
+              count(*) filter (where lower(severity_scanner)='critical') c,
+              count(*) filter (where lower(severity_scanner)='high')     h,
+              count(*) filter (where lower(severity_scanner)='medium')   m,
+              count(*) filter (where lower(severity_scanner)='low')      l
+            from abiertos group by 1 order by count(*) desc limit 10) t
+    ),
+    'by_app', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,
+        'Critical',c,'High',h,'Medium',m,'Low',l,'value',c+h+m+l) order by c+h+m+l desc),'[]'::jsonb)
+      from (select coalesce(nullif(app_name,''),'(sin app)') label,
+              count(*) filter (where lower(severity_scanner)='critical') c,
+              count(*) filter (where lower(severity_scanner)='high')     h,
+              count(*) filter (where lower(severity_scanner)='medium')   m,
+              count(*) filter (where lower(severity_scanner)='low')      l
+            from abiertos group by 1 order by count(*) desc limit 10) t
+    ),
+    'by_age', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,'value',value) order by ord),'[]'::jsonb)
+      from (
+        select b.label, b.ord, count(a.id) value
+        from (values ('0-30d',1,0,30),('31-90d',2,31,90),('91-180d',3,91,180),
+                     ('181-365d',4,181,365),('> 1 año',5,366,999999)) b(label,ord,lo,hi)
+        left join abiertos a on a.edad between b.lo and b.hi
+        group by b.label, b.ord
+      ) t
+    )
+  );
+$$;
+
+grant execute on function dashboard_metrics(text,text,text,text,text,text,text,text,text,text,boolean) to anon, authenticated;
+
+-- Catálogo de filtros secundarios (los primarios salen de v_org_tree)
+create or replace view v_filter_options as
+  select 'area' kind, coalesce(nullif(area,''),'(sin área)') label from findings
+  union select 'plataforma', coalesce(nullif(plataforma,''),'(sin plataforma)') from findings
+  union select 'responsable', coalesce(nullif(responsable,''),'(sin responsable)') from findings
+  union select 'kri', coalesce(nullif(kri_status,''),'(sin KRI)') from findings
+  union select 'tier', coalesce(nullif(tier,''),'(sin tier)') from findings;
+grant select on v_filter_options to anon, authenticated;
+
+-- Estas vistas cambian de columnas, así que hay que tirarlas: `create or replace
+-- view` solo permite AGREGAR columnas al final, no reordenar ni renombrar.
+drop view if exists v_hidden_debt;
+drop view if exists v_overdue;
+drop view if exists v_recast;
+
+-- Deuda oculta v2: ahora el SLA es el REAL de Tenable (Remediation time),
+-- no el 120 hardcodeado. Con SLA de 30d el hallazgo vence 4x más rápido.
+create view v_hidden_debt as
+  select finding_key, epm, app_name, it_vp, it_manager, asset, title, severity_scanner,
+    first_observed, sla_days, kri_status,
+    (current_date - first_observed::date) as true_age_days
+  from findings
+  where status <> 'fixed' and kri_status = 'IN_TIME'
+    and (current_date - first_observed::date) > coalesce(sla_days,120);
+grant select on v_hidden_debt to anon, authenticated;
+
+create view v_overdue as
+  select finding_key, epm, app_name, it_vp, it_manager, asset, title, severity_scanner,
+    first_observed, sla_days, (current_date - first_observed::date) as true_age_days
+  from findings
+  where status <> 'fixed' and (current_date - first_observed::date) > coalesce(sla_days,120);
+grant select on v_overdue to anon, authenticated;
+
+-- Recast sospechoso: el scanner dice Critical/High, Scotia lo baja a Low
+create view v_recast as
+  select finding_key, epm, app_name, it_vp, it_manager, asset, title,
+    severity_scanner, severity_scotia, recast_reason
+  from findings
+  where status <> 'fixed'
+    and lower(severity_scanner) in ('critical','high')
+    and lower(severity_scotia) = 'low';
+grant select on v_recast to anon, authenticated;
+
+-- ==========================================================================
+-- Blindaje del cierre masivo.
+-- Antes: "cierra lo que tenga last_seen < p_scan_time". Eso depende de que el
+-- cliente mande el MISMO timestamp en las N llamadas del lote. Si un reintento
+-- manda otro (o dos usuarios suben a la vez), la comparación se cumple para
+-- TODO y cierras el universo entero.
+-- Ahora: cada carga tiene un scan_id; se cierra lo que no traiga ese id.
+-- Es imposible que "derive" con el tiempo.
+-- ==========================================================================
+alter table findings add column if not exists last_scan_id uuid;
+create index if not exists idx_findings_scan on findings(source, last_scan_id);
+
+create or replace function ingest_findings(
+  p_source text, p_rows jsonb, p_scan_time timestamptz default now(),
+  p_close_missing boolean default true, p_scan_id uuid default null
+) returns jsonb
+language plpgsql security invoker as $$
+declare
+  v_new int:=0; v_updated int:=0; v_resurfaced int:=0; v_fixed int:=0; v_errors int:=0;
+  r jsonb; v_key text; v_prev text; v_title text; v_epm text; v_sev text; v_st text;
+  v_first timestamptz; v_cvss numeric; v_vpr numeric; v_rem int; v_sla int;
+begin
+  for r in select value from jsonb_array_elements(coalesce(p_rows,'[]'::jsonb)) as value loop
+    begin
+      v_key := nullif(r->>'finding_key',''); if v_key is null then v_errors:=v_errors+1; continue; end if;
+      v_sev := r->>'severity_scanner';
+      v_st  := coalesce(r->>'status','open');
+
+      begin v_first := (r->>'first_observed')::timestamptz; exception when others then v_first := p_scan_time; end;
+      begin v_cvss := (r->>'cvss')::numeric;  exception when others then v_cvss := null; end;
+      begin v_vpr  := (r->>'vpr')::numeric;   exception when others then v_vpr  := null; end;
+      begin v_rem  := (r->>'remaining_days')::int; exception when others then v_rem := null; end;
+      begin v_sla  := coalesce((r->>'sla_days')::int,120); exception when others then v_sla := 120; end;
+
+      select status, title, epm into v_prev, v_title, v_epm from findings where finding_key=v_key;
+
+      if not found then
+        insert into findings(finding_key,source,epm,asset,title,cve,plugin_id,severity_scanner,severity_scotia,
+          cvss,vpr,status,state_scanner,first_observed,last_seen,last_scan_id,last_fixed,resurfaced_date,
+          recast_reason,age_in_days,owner,kri_status,sla_days,remaining_days,area,plataforma,responsable,
+          it_svp,it_vp,it_manager,contact_app,app_name,tier,cia,managed_by,pais,lob,
+          exposed_internet,mx_regulatory,detail)
+        values(v_key,p_source,r->>'epm',r->>'asset',coalesce(r->>'title','(sin título)'),r->>'cve',r->>'plugin_id',
+          v_sev,r->>'severity_scotia',v_cvss,v_vpr,v_st,r->>'state_scanner',
+          coalesce(v_first,p_scan_time),p_scan_time,p_scan_id,
+          nullif(r->>'last_fixed','')::timestamptz, nullif(r->>'resurfaced_date','')::timestamptz,
+          r->>'recast_reason',(r->>'age_in_days')::numeric::int,
+          r->>'owner',r->>'kri_status',v_sla,v_rem,r->>'area',r->>'plataforma',r->>'responsable',
+          r->>'it_svp',r->>'it_vp',r->>'it_manager',r->>'contact_app',r->>'app_name',r->>'tier',
+          (r->>'cia')::boolean,r->>'managed_by',r->>'pais',r->>'lob',
+          (r->>'exposed_internet')::boolean,(r->>'mx_regulatory')::boolean,
+          coalesce(r->'detail','{}'::jsonb));
+        v_new:=v_new+1;
+        if v_st='resurfaced' then v_resurfaced:=v_resurfaced+1; end if;
+        if lower(coalesce(v_sev,'')) in ('critical','high') then
+          insert into alerts(finding_key,epm,kind,message,severity)
+          values(v_key,r->>'epm','new_finding','Nuevo hallazgo '||v_sev||': '||coalesce(r->>'title',''),v_sev);
+        end if;
+
+      else
+        update findings set
+          status=v_st, state_scanner=r->>'state_scanner', last_seen=p_scan_time, last_scan_id=p_scan_id,
+          severity_scanner=v_sev, severity_scotia=r->>'severity_scotia', cvss=v_cvss, vpr=v_vpr,
+          last_fixed=nullif(r->>'last_fixed','')::timestamptz,
+          resurfaced_date=nullif(r->>'resurfaced_date','')::timestamptz,
+          recast_reason=r->>'recast_reason', age_in_days=(r->>'age_in_days')::numeric::int,
+          kri_status=r->>'kri_status', sla_days=v_sla, remaining_days=v_rem,
+          area=r->>'area', plataforma=r->>'plataforma', responsable=r->>'responsable',
+          it_svp=r->>'it_svp', it_vp=r->>'it_vp', it_manager=r->>'it_manager',
+          contact_app=r->>'contact_app', app_name=r->>'app_name', tier=r->>'tier',
+          cia=(r->>'cia')::boolean, managed_by=r->>'managed_by', pais=r->>'pais', lob=r->>'lob',
+          exposed_internet=(r->>'exposed_internet')::boolean,
+          mx_regulatory=(r->>'mx_regulatory')::boolean, updated_at=now()
+        where finding_key=v_key;
+        if v_st='resurfaced' and v_prev is distinct from 'resurfaced' then
+          v_resurfaced:=v_resurfaced+1;
+          insert into alerts(finding_key,epm,kind,message,severity)
+          values(v_key,v_epm,'resurfaced','REABIERTA (Tenable la marcó RESURFACED): '||coalesce(v_title,''),v_sev);
+        else
+          v_updated:=v_updated+1;
+        end if;
+      end if;
+    exception when others then v_errors := v_errors + 1; end;
+  end loop;
+
+  -- Cierra por scan_id, no por timestamp. Sin scan_id NO cierra nada: preferimos
+  -- no cerrar a cerrar de más.
+  if p_close_missing and p_scan_id is not null then
+    update findings set status='fixed', last_fixed=coalesce(last_fixed,p_scan_time), updated_at=now()
+      where source=p_source and status <> 'fixed'
+        and last_scan_id is distinct from p_scan_id;
+    get diagnostics v_fixed = row_count;
+  end if;
+  return jsonb_build_object('new',v_new,'updated',v_updated,'resurfaced',v_resurfaced,'fixed',v_fixed,'errores',v_errors);
+end $$;
+
+grant execute on function ingest_findings(text,jsonb,timestamptz,boolean,uuid) to anon, authenticated;
+-- la firma vieja de 4 args queda muerta: un cliente sin scan_id no debe cerrar nada
+drop function if exists ingest_findings(text, jsonb, timestamptz, boolean);

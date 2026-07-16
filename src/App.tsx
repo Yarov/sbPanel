@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { supabase, hasSupabase } from "./supabase";
-import { parseCsv, toObjects } from "./lib/csv";
-import { ingest, SOURCES, SourceId, IngestResult } from "./lib/ingest";
-import { Donut, BarsH } from "./Charts";
+import { ingestFile, SOURCES, SourceId, IngestResult } from "./lib/ingest";
+import { Donut, StackH, Aging, KRI_COLORS } from "./Charts";
 import {
-  AlertOctagon, Layers, RotateCcw, ShieldAlert, ShieldX, CircleAlert,
+  AlertOctagon, Layers, RotateCcw, ShieldAlert, ShieldX, CircleAlert, Scale,
   Loader2, Search, CheckCircle2, AlertTriangle, X, ChevronLeft, ChevronRight,
 } from "lucide-react";
 
@@ -23,6 +22,8 @@ type Finding = {
   title: string; cve: string | null; severity_scanner: string | null; severity_scotia: string | null;
   status: string; first_observed: string; kri_status: string | null; remaining_days: number | null;
   area: string | null; plataforma: string | null; responsable: string | null;
+  it_vp: string | null; it_manager: string | null; app_name: string | null;
+  sla_days: number | null; exposed_internet: boolean | null;
 };
 type Alert = { id: string; kind: string; message: string; severity: string | null; acknowledged: boolean; created_at: string };
 type AppScan = { source: string; project_name: string; epm: string | null; policy_status: string | null; risk_level: string | null; crit: number; high: number; med: number; low: number };
@@ -30,7 +31,6 @@ const PROFILE_KEY = "scotia_profile";
 const SEVS = ["Critical", "High", "Medium", "Low"];
 const STATUSES = ["open", "resurfaced", "fixed"];
 const sevClass = (s?: string | null) => `sev sev-${(s || "").toLowerCase()}`;
-const NO = { "(sin área)": "", "(sin plataforma)": "", "(sin responsable)": "" } as Record<string, string>;
 
 // ---------- Login ----------
 function Login({ onDone }: { onDone: (p: Profile) => void }) {
@@ -65,9 +65,9 @@ function Upload({ onDone }: { onDone: () => void }) {
   const [source, setSource] = useState<SourceId>("tenable");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [res, setRes] = useState<(IngestResult & { rows: number }) | null>(null);
+  const [res, setRes] = useState<IngestResult | null>(null);
   const [phase, setPhase] = useState("");
-  const [prog, setProg] = useState<{ done: number; total: number; rows: number } | null>(null);
+  const [prog, setProg] = useState<{ rows: number; bytes: number; total: number } | null>(null);
   const [t0, setT0] = useState(0);
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -81,14 +81,9 @@ function Upload({ onDone }: { onDone: () => void }) {
     if (!file) return;
     setBusy(true); setErr(""); setRes(null); setProg(null); setT0(performance.now());
     try {
-      setPhase("Leyendo archivo…");
-      const text = await file.text();
-      setPhase("Parseando CSV…");
-      const objs = toObjects(parseCsv(text));
-      if (!objs.length) throw new Error("El CSV no tiene filas de datos.");
-      setPhase(`Cargando ${objs.length.toLocaleString()} filas…`);
-      const r = await ingest(source, objs, (done, total) => setProg({ done, total, rows: objs.length }));
-      setRes({ ...r, rows: objs.length });
+      setPhase("Leyendo y cargando…");
+      const r = await ingestFile(source, file, setProg);
+      setRes(r);
       onDone();
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -97,14 +92,24 @@ function Upload({ onDone }: { onDone: () => void }) {
     }
   }
 
-  const pct = prog && prog.total ? Math.round((prog.done / prog.total) * 100) : 0;
+  // El streaming no sabe cuántas filas hay hasta terminar: el avance se mide
+  // en bytes leídos del archivo, que sí se conocen desde el principio.
+  const pct = prog && prog.total ? Math.round((prog.bytes / prog.total) * 100) : 0;
   const secs = busy && t0 ? ((performance.now() - t0) / 1000).toFixed(0) : "0";
+  const mb = (b: number) => (b / 1e6).toFixed(1);
 
   return (
     <div className="panel">
       <h2>Cargar escaneo (CSV)</h2>
       <p className="hint">Elige la fuente y sube el CSV. La conciliación es automática: detecta nuevas,
         cierra las que ya no aparecen, <b>reabre y alerta</b> las que resurgen.</p>
+      {source === "tenable" && (
+        <p className="hint hint-warn"><AlertTriangle size={14} /> El export de Tenable viene en xlsx con
+          91 columnas, y el navegador <b>no puede leer xlsx</b> (es un zip: habría que
+          descomprimirlo entero en memoria). Pásalo antes por{" "}
+          <code>python3 scripts/clean_tenable.py archivo.xlsx</code> — deja las 37 columnas
+          que usa el dashboard en un CSV ~90% más ligero.</p>
+      )}
       <div className="sources">
         {SOURCES.map((s) => (
           <button key={s.id} className={`src ${source === s.id ? "active" : ""}`} onClick={() => !busy && setSource(s.id)}>
@@ -116,7 +121,9 @@ function Upload({ onDone }: { onDone: () => void }) {
         <input type="file" accept=".csv,text/csv" onChange={onFile} disabled={busy} hidden />
         {busy ? (
           <span className="dz-busy"><Loader2 size={16} className="spin" />
-            {prog ? `Procesando ${prog.rows.toLocaleString()} filas · lote ${prog.done}/${prog.total} · ${pct}% · ${secs}s` : phase}
+            {prog
+              ? `${prog.rows.toLocaleString()} filas · ${mb(prog.bytes)}/${mb(prog.total)} MB · ${pct}% · ${secs}s`
+              : phase}
           </span>
         ) : `Suelta o elige el CSV de ${SOURCES.find((s) => s.id === source)!.label}`}
       </label>
@@ -135,20 +142,31 @@ function Upload({ onDone }: { onDone: () => void }) {
 }
 
 // ---------- Dashboard (métricas + gráficas filtrables) ----------
-const EMPTY_M = { kpi: {}, by_severity: [], by_area: [], by_plataforma: [], by_responsable: [] };
+const EMPTY_M = { kpi: {}, by_severity: [], by_kri: [], by_it_vp: [], by_it_manager: [], by_app: [], by_age: [] };
+const EMPTY_F = {
+  it_vp: "", it_manager: "", app: "", severity: "", kri: "",
+  status: "", source: "", area: "", plataforma: "", responsable: "",
+};
+type Org = { it_vp: string; it_manager: string; app_name: string; epm: string; abiertos: number };
+
 function Dashboard() {
   const [m, setM] = useState<any>(EMPTY_M);
   const [debt, setDebt] = useState<any[]>([]);
+  const [recast, setRecast] = useState<any[]>([]);
   const [cross, setCross] = useState<any[]>([]);
   const [scans, setScans] = useState<AppScan[]>([]);
-  const [f, setF] = useState({ area: "", plataforma: "", responsable: "", severity: "", source: "" });
-  const [opts, setOpts] = useState<{ area: string[]; plataforma: string[]; responsable: string[] }>({ area: [], plataforma: [], responsable: [] });
+  const [f, setF] = useState(EMPTY_F);
+  const [org, setOrg] = useState<Org[]>([]);
+  const [opts, setOpts] = useState<Record<string, string[]>>({});
   const fRef = useRef(f); fRef.current = f;
 
   useEffect(() => {
+    supabase.from("v_org_tree").select("it_vp,it_manager,app_name,epm,abiertos").then((r) =>
+      setOrg((r.data ?? []) as Org[]));
     supabase.from("v_filter_options").select("*").then((r) => {
-      const o = { area: [] as string[], plataforma: [] as string[], responsable: [] as string[] };
-      for (const x of (r.data ?? []) as any[]) (o as any)[x.kind]?.push(x.label);
+      const o: Record<string, string[]> = {};
+      for (const x of (r.data ?? []) as any[]) (o[x.kind] ??= []).push(x.label);
+      for (const k in o) o[k].sort();
       setOpts(o);
     });
   }, []);
@@ -156,16 +174,20 @@ function Dashboard() {
   async function load() {
     const g = fRef.current;
     const { data } = await supabase.rpc("dashboard_metrics", {
-      p_area: g.area || null, p_plataforma: g.plataforma || null, p_responsable: g.responsable || null,
-      p_severity: g.severity || null, p_source: g.source || null,
+      p_it_vp: g.it_vp || null, p_it_manager: g.it_manager || null, p_app: g.app || null,
+      p_severity: g.severity || null, p_kri: g.kri || null, p_status: g.status || null,
+      p_source: g.source || null, p_area: g.area || null,
+      p_plataforma: g.plataforma || null, p_responsable: g.responsable || null,
     });
     setM(data ?? EMPTY_M);
-    const [d, c, sc] = await Promise.all([
-      supabase.from("v_hidden_debt").select("asset,title,true_age_days").order("true_age_days", { ascending: false }).limit(8),
+    const [d, rc, c, sc] = await Promise.all([
+      supabase.from("v_hidden_debt").select("asset,title,true_age_days,sla_days,it_vp").order("true_age_days", { ascending: false }).limit(8),
+      supabase.from("v_recast").select("title,asset,severity_scanner,severity_scotia,it_vp").limit(8),
       supabase.from("v_cross_layer").select("*").order("capas", { ascending: false }).limit(8),
       supabase.from("app_scans").select("*").order("crit", { ascending: false }).limit(30),
     ]);
-    setDebt(d.data ?? []); setCross(c.data ?? []); setScans((sc.data ?? []) as AppScan[]);
+    setDebt(d.data ?? []); setRecast(rc.data ?? []);
+    setCross(c.data ?? []); setScans((sc.data ?? []) as AppScan[]);
   }
   useEffect(() => { load(); }, [f]);
   useEffect(() => {
@@ -180,34 +202,66 @@ function Dashboard() {
   const set = (k: string, v: string) => setF((p) => ({ ...p, [k]: v }));
   const active = Object.values(f).some(Boolean);
 
+  // La cascada: el VP acota los managers, y VP+manager acotan las apps.
+  // v_org_tree son pocas filas (distintos), así que se cascadea en cliente.
+  const uniq = (xs: string[]) => [...new Set(xs)].sort();
+  const vps = uniq(org.map((o) => o.it_vp));
+  const managers = uniq(org.filter((o) => !f.it_vp || o.it_vp === f.it_vp).map((o) => o.it_manager));
+  const apps = uniq(org
+    .filter((o) => (!f.it_vp || o.it_vp === f.it_vp) && (!f.it_manager || o.it_manager === f.it_manager))
+    .map((o) => o.app_name));
+
+  // Al cambiar el VP, el manager/app elegidos pueden quedar fuera de su rama.
+  const pickVp = (v: string) => setF((p) => ({ ...p, it_vp: v, it_manager: "", app: "" }));
+  const pickMgr = (v: string) => setF((p) => ({ ...p, it_manager: v, app: "" }));
+
   return (
     <div>
       <div className="filters-bar">
-        <select value={f.area} onChange={(e) => set("area", e.currentTarget.value)}>
-          <option value="">Todas las áreas</option>{opts.area.map((a) => <option key={a}>{a}</option>)}
+        <select className="grow" value={f.it_vp} onChange={(e) => pickVp(e.currentTarget.value)}>
+          <option value="">Todos los IT VP ({vps.length})</option>
+          {vps.map((a) => <option key={a}>{a}</option>)}
         </select>
-        <select value={f.plataforma} onChange={(e) => set("plataforma", e.currentTarget.value)}>
-          <option value="">Toda plataforma</option>{opts.plataforma.map((a) => <option key={a}>{a}</option>)}
+        <select className="grow" value={f.it_manager} onChange={(e) => pickMgr(e.currentTarget.value)}>
+          <option value="">Todos los IT Manager ({managers.length})</option>
+          {managers.map((a) => <option key={a}>{a}</option>)}
         </select>
-        <select value={f.responsable} onChange={(e) => set("responsable", e.currentTarget.value)}>
-          <option value="">Todo responsable</option>{opts.responsable.map((a) => <option key={a}>{a}</option>)}
+        <select className="grow" value={f.app} onChange={(e) => set("app", e.currentTarget.value)}>
+          <option value="">Todas las apps ({apps.length})</option>
+          {apps.map((a) => <option key={a}>{a}</option>)}
         </select>
+      </div>
+      <div className="filters-bar">
         <select value={f.severity} onChange={(e) => set("severity", e.currentTarget.value)}>
           <option value="">Severidad</option>{SEVS.map((s) => <option key={s}>{s}</option>)}
+        </select>
+        <select value={f.kri} onChange={(e) => set("kri", e.currentTarget.value)}>
+          <option value="">KRI</option>{(opts.kri ?? []).map((s) => <option key={s}>{s}</option>)}
+        </select>
+        <select value={f.status} onChange={(e) => set("status", e.currentTarget.value)}>
+          <option value="">Estado</option>{STATUSES.map((s) => <option key={s}>{s}</option>)}
         </select>
         <select value={f.source} onChange={(e) => set("source", e.currentTarget.value)}>
           <option value="">Fuente</option>{SOURCES.map((s) => <option key={s.id} value={s.id}>{s.id}</option>)}
         </select>
-        {active && <button className="ghost btn-i" onClick={() => setF({ area: "", plataforma: "", responsable: "", severity: "", source: "" })}><X size={14} /> Limpiar</button>}
+        <select value={f.area} onChange={(e) => set("area", e.currentTarget.value)}>
+          <option value="">Área</option>{(opts.area ?? []).map((a) => <option key={a}>{a}</option>)}
+        </select>
+        <select value={f.responsable} onChange={(e) => set("responsable", e.currentTarget.value)}>
+          <option value="">Responsable</option>{(opts.responsable ?? []).map((a) => <option key={a}>{a}</option>)}
+        </select>
+        {active && <button className="ghost btn-i" onClick={() => setF(EMPTY_F)}><X size={14} /> Limpiar</button>}
       </div>
 
       <div className="kpis">
-        <Kpi n={kpi.total ?? 0} label="Hallazgos" />
         <Kpi n={kpi.abiertos ?? 0} label="Abiertos" />
         <Kpi n={kpi.criticos ?? 0} label="Críticos" tone="red" />
+        <Kpi n={kpi.fuera_sla ?? 0} label="Fuera de SLA" tone="red" />
         <Kpi n={kpi.resurfaced ?? 0} label="Resurfaced" tone="amber" />
-        <Kpi n={kpi.areas ?? 0} label="Áreas" />
-        <Kpi n={kpi.responsables ?? 0} label="Responsables" />
+        <Kpi n={kpi.expuestos ?? 0} label="Expuestos a internet" tone="amber" />
+        <Kpi n={kpi.vps ?? 0} label="IT VP" />
+        <Kpi n={kpi.managers ?? 0} label="IT Manager" />
+        <Kpi n={kpi.apps ?? 0} label="Aplicaciones" />
       </div>
 
       <div className="charts">
@@ -216,22 +270,37 @@ function Dashboard() {
           {m.by_severity?.length ? <Donut data={m.by_severity} onSelect={(l) => set("severity", l)} /> : <Empty />}
         </div>
         <div className="chart-card">
-          <h3>Por Área</h3>
-          {m.by_area?.length ? <BarsH data={m.by_area} onSelect={(l) => set("area", NO[l] ?? l)} /> : <Empty />}
+          <h3>Estado KRI</h3>
+          {m.by_kri?.length ? <Donut data={m.by_kri} unit="abiertos" colors={KRI_COLORS} onSelect={(l) => set("kri", l)} /> : <Empty />}
+        </div>
+        <div className="chart-card wide">
+          <h3>Por IT VP <span className="h3-sub">clic para filtrar</span></h3>
+          {m.by_it_vp?.length ? <StackH data={m.by_it_vp} onSelect={(l) => pickVp(l)} /> : <Empty />}
+        </div>
+        <div className="chart-card wide">
+          <h3>Por IT Manager <span className="h3-sub">clic para filtrar</span></h3>
+          {m.by_it_manager?.length ? <StackH data={m.by_it_manager} onSelect={(l) => pickMgr(l)} /> : <Empty />}
+        </div>
+        <div className="chart-card wide">
+          <h3>Top aplicaciones</h3>
+          {m.by_app?.length ? <StackH data={m.by_app} onSelect={(l) => set("app", l)} /> : <Empty />}
         </div>
         <div className="chart-card">
-          <h3>Por Plataforma</h3>
-          {m.by_plataforma?.length ? <BarsH data={m.by_plataforma} color="#60a5fa" onSelect={(l) => set("plataforma", NO[l] ?? l)} /> : <Empty />}
-        </div>
-        <div className="chart-card">
-          <h3>Top Responsables</h3>
-          {m.by_responsable?.length ? <BarsH data={m.by_responsable} color="#fbbf24" onSelect={(l) => set("responsable", NO[l] ?? l)} /> : <Empty />}
+          <h3>Antigüedad de lo abierto</h3>
+          {m.by_age?.length ? <Aging data={m.by_age} /> : <Empty />}
         </div>
       </div>
 
       {debt.length > 0 && (
-        <Insight icon={<AlertOctagon size={15} className="i-red" />} title="Deuda oculta (KRI dice IN_TIME pero llevan años)" items={debt.map((d: any) => ({
-          key: d.asset + d.title, main: d.title, meta: `${d.asset} · ${d.true_age_days} días reales`,
+        <Insight icon={<AlertOctagon size={15} className="i-red" />} title="Deuda oculta (KRI dice IN_TIME pero ya vencieron)" items={debt.map((d: any) => ({
+          key: d.asset + d.title, main: d.title,
+          meta: `${d.asset} · ${d.true_age_days}d reales vs SLA ${d.sla_days}d · ${d.it_vp ?? "sin VP"}`,
+        }))} />
+      )}
+      {recast.length > 0 && (
+        <Insight icon={<Scale size={15} className="i-amber" />} title="Recast sospechoso (el scanner dice Critical/High, Scotia lo bajó a Low)" items={recast.map((r: any) => ({
+          key: r.asset + r.title, main: r.title,
+          meta: `${r.severity_scanner} → ${r.severity_scotia} · ${r.asset} · ${r.it_vp ?? "sin VP"}`,
         }))} />
       )}
       {cross.length > 0 && (
@@ -270,12 +339,12 @@ function Hallazgos() {
   const [count, setCount] = useState(0);
   const [page, setPage] = useState(0);
   const [q, setQ] = useState("");
-  const [f, setF] = useState({ sev: "", status: "", source: "", area: "" });
-  const [areas, setAreas] = useState<string[]>([]);
+  const [f, setF] = useState({ sev: "", status: "", source: "", it_vp: "", it_manager: "" });
+  const [org, setOrg] = useState<Org[]>([]);
 
   useEffect(() => {
-    supabase.from("v_by_area").select("label").limit(100).then((r) =>
-      setAreas(((r.data ?? []) as any[]).map((x) => x.label)));
+    supabase.from("v_org_tree").select("it_vp,it_manager,app_name,epm,abiertos").then((r) =>
+      setOrg((r.data ?? []) as Org[]));
   }, []);
 
   useEffect(() => {
@@ -283,17 +352,22 @@ function Hallazgos() {
     (async () => {
       let query = supabase.from("findings").select("*", { count: "exact" });
       const term = q.trim().replace(/[,()]/g, " ");
-      if (term) query = query.or(`asset.ilike.*${term}*,title.ilike.*${term}*,cve.ilike.*${term}*,epm.ilike.*${term}*,responsable.ilike.*${term}*`);
+      if (term) query = query.or(`asset.ilike.*${term}*,title.ilike.*${term}*,cve.ilike.*${term}*,epm.ilike.*${term}*,app_name.ilike.*${term}*,it_vp.ilike.*${term}*,it_manager.ilike.*${term}*`);
       if (f.sev) query = query.eq("severity_scanner", f.sev);
       if (f.status) query = query.eq("status", f.status);
       if (f.source) query = query.eq("source", f.source);
-      if (f.area) query = query.eq("area", f.area);
+      if (f.it_vp) query = query.eq("it_vp", f.it_vp);
+      if (f.it_manager) query = query.eq("it_manager", f.it_manager);
       query = query.order("last_seen", { ascending: false }).range(page * PAGE, page * PAGE + PAGE - 1);
       const { data, count } = await query;
       if (!cancel) { setRows((data ?? []) as Finding[]); setCount(count ?? 0); }
     })();
     return () => { cancel = true; };
   }, [q, f, page]);
+
+  const uniq = (xs: string[]) => [...new Set(xs)].sort();
+  const vps = uniq(org.map((o) => o.it_vp));
+  const managers = uniq(org.filter((o) => !f.it_vp || o.it_vp === f.it_vp).map((o) => o.it_manager));
 
   const set = (k: string, v: string) => { setF((p) => ({ ...p, [k]: v })); setPage(0); };
   const pages = Math.ceil(count / PAGE);
@@ -304,8 +378,14 @@ function Hallazgos() {
         <div className="search-wrap grow">
           <Search size={16} className="i-muted" />
           <input value={q} onChange={(e) => { setQ(e.currentTarget.value); setPage(0); }}
-            placeholder="Buscar activo, título, CVE, EPM, responsable…" />
+            placeholder="Buscar activo, título, CVE, EPM, app, IT VP, IT Manager…" />
         </div>
+        <select value={f.it_vp} onChange={(e) => { setF((p) => ({ ...p, it_vp: e.currentTarget.value, it_manager: "" })); setPage(0); }}>
+          <option value="">IT VP</option>{vps.map((a) => <option key={a}>{a}</option>)}
+        </select>
+        <select value={f.it_manager} onChange={(e) => set("it_manager", e.currentTarget.value)}>
+          <option value="">IT Manager</option>{managers.map((a) => <option key={a}>{a}</option>)}
+        </select>
         <select value={f.sev} onChange={(e) => set("sev", e.currentTarget.value)}>
           <option value="">Severidad</option>{SEVS.map((s) => <option key={s}>{s}</option>)}
         </select>
@@ -315,14 +395,11 @@ function Hallazgos() {
         <select value={f.source} onChange={(e) => set("source", e.currentTarget.value)}>
           <option value="">Fuente</option>{SOURCES.map((s) => <option key={s.id} value={s.id}>{s.id}</option>)}
         </select>
-        <select value={f.area} onChange={(e) => set("area", e.currentTarget.value)}>
-          <option value="">Área</option>{areas.map((a) => <option key={a}>{a}</option>)}
-        </select>
       </div>
       <p className="hint">{count.toLocaleString()} hallazgos</p>
       <div className="tbl-wrap">
         <table className="tbl">
-          <thead><tr><th>Sev</th><th>Estado</th><th>Activo</th><th>Título</th><th>EPM</th><th>Área</th><th>Responsable</th><th>KRI</th></tr></thead>
+          <thead><tr><th>Sev</th><th>Estado</th><th>Activo</th><th>Título</th><th>App</th><th>IT VP</th><th>IT Manager</th><th>KRI</th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
@@ -330,9 +407,9 @@ function Hallazgos() {
                 <td><span className={`st st-${r.status}`}>{r.status}</span></td>
                 <td className="mono">{r.asset}</td>
                 <td className="clip">{r.title}</td>
-                <td>{r.epm ?? "—"}</td>
-                <td>{r.area ?? "—"}</td>
-                <td>{r.responsable ?? "—"}</td>
+                <td className="clip">{r.app_name ?? r.epm ?? "—"}</td>
+                <td>{r.it_vp ?? "—"}</td>
+                <td>{r.it_manager ?? "—"}</td>
                 <td>{r.kri_status ?? "—"}{r.remaining_days != null ? ` · ${r.remaining_days}d` : ""}</td>
               </tr>
             ))}
