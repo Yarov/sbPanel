@@ -3,15 +3,18 @@ name: deploy-pages
 # Compila la PWA y la publica en GitHub Pages en cada push a main.
 # Las credenciales de Supabase se inyectan desde los Secrets del repo.
 
-# Publicaba en GitHub Pages (sitio PÚBLICO) en cada push a main. La data trae
-# hostnames de PROD con sus CVEs sin parchar y el nombre del responsable, así que
-# el disparo automático está apagado a propósito.
+# Publica en GitHub Pages (sitio PÚBLICO) en cada push a main.
 #
-# Para volver a encenderlo hacen falta las tres:
-#   1. RLS por rol y `anon` revocado          (supabase/cerrar_puerta.sql)
-#   2. anon key rotada — la vieja ya circuló  (Settings -> API -> Rotate)
-#   3. hosting interno, no Pages público
+# El sitio es público, así que quien lo abra ve el login. Lo que hay atrás lo
+# protege la RLS: `anon` no alcanza ninguna tabla ni función, y todo exige sesión
+# (supabase/cerrar_puerta.sql + los grants a `authenticated` de schema.sql).
+# La anon key va en el bundle a propósito: solo sirve para llegar a /auth/v1/token.
+#
+# Si alguna vez alguien vuelve a darle permisos a `anon`, este deploy convierte
+# eso en una fuga pública. Ese es el invariante que hay que cuidar.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
