@@ -3,9 +3,15 @@ name: deploy-pages
 # Compila la PWA y la publica en GitHub Pages en cada push a main.
 # Las credenciales de Supabase se inyectan desde los Secrets del repo.
 
+# Publicaba en GitHub Pages (sitio PÚBLICO) en cada push a main. La data trae
+# hostnames de PROD con sus CVEs sin parchar y el nombre del responsable, así que
+# el disparo automático está apagado a propósito.
+#
+# Para volver a encenderlo hacen falta las tres:
+#   1. RLS por rol y `anon` revocado          (supabase/cerrar_puerta.sql)
+#   2. anon key rotada — la vieja ya circuló  (Settings -> API -> Rotate)
+#   3. hosting interno, no Pages público
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

@@ -635,9 +635,12 @@ create or replace view v_filter_options as
   union select 'tier',  coalesce(nullif(tier,''),'(sin tier)') from silver.applications;
 
 -- ==========================================================================
--- Permisos. RLS abierta mientras dure la prueba: el techo de cierre de
--- load_commit es lo que impide que una llamada suelta cierre el universo.
--- Antes de datos reales en un sitio público, esto se cierra con Auth.
+-- Permisos. `anon` NO alcanza nada: la data trae hostnames de PROD con sus
+-- CVEs sin parchar y el nombre del responsable. Todo exige sesión.
+--
+-- Por ahora, cualquier usuario autenticado ve todo. El siguiente paso natural
+-- es acotar por rama del árbol (un IT VP ve solo sus apps), que el modelo por
+-- APM ya hace posible: findings -> applications -> it_vp.
 -- ==========================================================================
 alter table bronze.loads            enable row level security;
 alter table silver.applications     enable row level security;
@@ -646,27 +649,36 @@ alter table silver.finding_events   enable row level security;
 alter table silver.app_scans        enable row level security;
 alter table silver.project_epm_map  enable row level security;
 
-do $$ declare t text; s text;
+do $$ declare t text;
 begin
   foreach t in array array['bronze.loads','silver.applications','silver.findings',
                            'silver.finding_events','silver.app_scans','silver.project_epm_map'] loop
-    execute format('drop policy if exists prueba_abierta on %s', t);
-    execute format('create policy prueba_abierta on %s for all to anon, authenticated using (true) with check (true)', t);
-    execute format('grant all on %s to anon, authenticated', t);
+    execute format('drop policy if exists prueba_abierta on %s', t);   -- la vieja, abierta a anon
+    execute format('drop policy if exists solo_con_sesion on %s', t);
+    execute format('create policy solo_con_sesion on %s for all to authenticated using (true) with check (true)', t);
+    execute format('revoke all on %s from anon', t);
+    execute format('grant all on %s to authenticated', t);
   end loop;
 end $$;
 
-grant usage on schema bronze, silver to anon, authenticated;
-grant usage, select on all sequences in schema silver to anon, authenticated;
+revoke all on schema bronze, silver from anon;
+grant usage on schema bronze, silver to authenticated;
+grant usage, select on all sequences in schema silver to authenticated;
 grant select on v_findings, v_org_tree, v_loads, v_activity, v_hidden_debt,
                 v_recast_log, v_cross_layer, v_app_scans, v_filter_options
-      to anon, authenticated;
-grant execute on function load_begin(text,text,text)            to anon, authenticated;
-grant execute on function load_batch(uuid,jsonb)                to anon, authenticated;
-grant execute on function load_commit(uuid,int,boolean)         to anon, authenticated;
-grant execute on function load_abort(uuid,text)                 to anon, authenticated;
+      to authenticated;
+revoke select on v_findings, v_org_tree, v_loads, v_activity, v_hidden_debt,
+                 v_recast_log, v_cross_layer, v_app_scans, v_filter_options
+      from anon;
+grant execute on function load_begin(text,text,text)            to authenticated;
+grant execute on function load_batch(uuid,jsonb)                to authenticated;
+grant execute on function load_commit(uuid,int,boolean)         to authenticated;
+grant execute on function load_abort(uuid,text)                 to authenticated;
 grant execute on function dashboard_metrics(text,text,text,text,text,text,text,boolean)
-      to anon, authenticated;
+      to authenticated;
+-- Postgres le da EXECUTE a PUBLIC por default en cada función nueva, y anon
+-- hereda de PUBLIC: sin este revoke, las funciones de carga nacen abiertas.
+revoke execute on all functions in schema public from public, anon;
 
 -- Realtime: SOLO el acta de cargas. Antes `findings` estaba publicada y una
 -- carga emitía 63,600 mensajes, cada uno evaluado contra RLS por suscriptor.

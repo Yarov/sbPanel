@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import { supabase, hasSupabase } from "./supabase";
 import { ingestFile, SOURCES, SourceId, IngestResult } from "./lib/ingest";
 import { Donut, StackH, Aging, KRI_COLORS } from "./Charts";
@@ -7,7 +8,6 @@ import {
   Loader2, Search, CheckCircle2, AlertTriangle, X, ChevronLeft, ChevronRight,
 } from "lucide-react";
 
-type Profile = { scotiaId: string; name: string };
 type Finding = {
   finding_key: string; source: string; epm: string | null; asset: string | null;
   title: string; cve: string | null; severity_scanner: string | null; severity_scotia: string | null;
@@ -26,41 +26,51 @@ type Load = {
   rows_closed: number; epms_seen: number; blocked_reason: string | null;
 };
 type AppScan = { source: string; project_name: string; epm: string | null; policy_status: string | null; risk_level: string | null; crit: number; high: number; med: number; low: number };
-const PROFILE_KEY = "scotia_profile";
 const SEVS = ["Critical", "High", "Medium", "Low"];
 const STATUSES = ["open", "resurfaced", "fixed", "not_observed"];
 const sevClass = (s?: string | null) => `sev sev-${(s || "").toLowerCase()}`;
 
-// ---------- Login ----------
-function Login({ onDone }: { onDone: (p: Profile) => void }) {
-  const [scotiaId, setScotiaId] = useState("");
-  const [name, setName] = useState("");
-  const [error, setError] = useState("");
-  function submit(e: React.FormEvent) {
+// ---------- Login (Supabase Auth) ----------
+// Antes esto era un localStorage.setItem con tu nombre: cualquiera con la URL
+// entraba. La data trae hostnames de PROD con sus CVEs abiertos, así que ahora
+// exige sesión de verdad y la RLS solo responde a `authenticated`.
+function Login() {
+  const [email, setEmail] = useState("");
+  const [pass, setPass] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!scotiaId.trim() || !name.trim()) return setError("ScotiaID y nombre son obligatorios");
-    const p = { scotiaId: scotiaId.trim(), name: name.trim() };
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
-    onDone(p);
+    setBusy(true); setErr("");
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(), password: pass,
+    });
+    if (error) setErr(error.message);
+    setBusy(false);
   }
+
   return (
     <main className="login">
       <div className="login-card">
         <h1 className="login-brand">Scotia · Reporter</h1>
-        <p className="login-sub">Gestión de vulnerabilidades · ingresa tus datos</p>
+        <p className="login-sub">Gestión de vulnerabilidades</p>
         <form onSubmit={submit}>
-          <input value={scotiaId} onChange={(e) => setScotiaId(e.currentTarget.value)} placeholder="ScotiaID" autoFocus />
-          <input value={name} onChange={(e) => setName(e.currentTarget.value)} placeholder="Nombre completo" />
-          <button type="submit">Entrar</button>
+          <input type="email" value={email} onChange={(e) => setEmail(e.currentTarget.value)}
+            placeholder="Correo" autoFocus autoComplete="username" />
+          <input type="password" value={pass} onChange={(e) => setPass(e.currentTarget.value)}
+            placeholder="Contraseña" autoComplete="current-password" />
+          <button type="submit" disabled={busy}>{busy ? "Entrando…" : "Entrar"}</button>
         </form>
-        {error && <p className="error">{error}</p>}
+        {err && <p className="error"><AlertTriangle size={15} /> {err}</p>}
+        <p className="login-foot">Las cuentas se dan de alta en Supabase → Authentication.</p>
       </div>
     </main>
   );
 }
 
 // ---------- Cargar CSV ----------
-function Upload({ onDone }: { onDone: () => void }) {
+function Upload({ onDone, quien }: { onDone: () => void; quien: string }) {
   const [source, setSource] = useState<SourceId>("tenable");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -81,7 +91,7 @@ function Upload({ onDone }: { onDone: () => void }) {
     setBusy(true); setErr(""); setRes(null); setProg(null); setT0(performance.now());
     try {
       setPhase("Leyendo y cargando…");
-      const r = await ingestFile(source, file, setProg);
+      const r = await ingestFile(source, file, setProg, quien);
       setRes(r);
       onDone();
     } catch (e: any) {
@@ -551,23 +561,32 @@ function Empty() { return <div className="empty">Sin datos. Carga un CSV.</div>;
 
 // ---------- Raíz ----------
 function App() {
-  const [profile, setProfile] = useState<Profile | null>(() => {
-    const raw = localStorage.getItem(PROFILE_KEY);
-    return raw ? (JSON.parse(raw) as Profile) : null;
-  });
+  const [session, setSession] = useState<Session | null>(null);
+  const [cargando, setCargando] = useState(true);
   const [tab, setTab] = useState<"dash" | "find" | "upload" | "act">("dash");
   const [reload, setReload] = useState(0);
 
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session); setCargando(false);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
   if (!hasSupabase) return <main className="login"><div className="login-card"><h1 className="login-brand">Falta Supabase</h1></div></main>;
-  if (!profile) return <Login onDone={setProfile} />;
+  if (cargando) return <main className="login"><div className="login-card"><Loader2 size={20} className="spin" /></div></main>;
+  if (!session) return <Login />;
+
+  const quien = session.user.email ?? "";
 
   return (
     <main className="container">
       <div className="header">
         <h1>Scotia · Reporter</h1>
         <div className="header-right">
-          <span className="user-chip">{profile.name} · {profile.scotiaId}</span>
-          <button className="ghost" onClick={() => { localStorage.removeItem(PROFILE_KEY); setProfile(null); }}>Salir</button>
+          <span className="user-chip">{quien}</span>
+          <button className="ghost" onClick={() => supabase.auth.signOut()}>Salir</button>
         </div>
       </div>
       <nav className="tabs">
@@ -578,7 +597,7 @@ function App() {
       </nav>
       {tab === "dash" && <Dashboard key={reload} />}
       {tab === "find" && <Hallazgos />}
-      {tab === "upload" && <Upload onDone={() => setReload((r) => r + 1)} />}
+      {tab === "upload" && <Upload quien={quien} onDone={() => setReload((r) => r + 1)} />}
       {tab === "act" && <Actividad />}
     </main>
   );
