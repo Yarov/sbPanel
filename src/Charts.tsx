@@ -55,25 +55,6 @@ export function Donut({ data, unit = "abiertos", colors, onSelect }: {
   );
 }
 
-export function BarsH({ data, color = RED, onSelect }: { data: Datum[]; color?: string } & Sel) {
-  const h = Math.max(150, data.length * 34 + 10);
-  return (
-    <ResponsiveContainer width="100%" height={h}>
-      <BarChart data={data} layout="vertical" margin={{ left: 6, right: 30, top: 4, bottom: 4 }}>
-        <XAxis type="number" hide />
-        <YAxis type="category" dataKey="label" width={150}
-          tick={{ fill: "#9ca3af", fontSize: 11 }} tickLine={false} axisLine={false} />
-        <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
-        <Bar dataKey="value" fill={color} radius={[0, 5, 5, 0]} barSize={18}
-          cursor={onSelect ? "pointer" : "default"}
-          onClick={(e: any) => onSelect?.(e?.label ?? e?.payload?.label)}>
-          <LabelList dataKey="value" position="right" fill="#9ca3af" fontSize={11} />
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
-  );
-}
-
 /**
  * Barras apiladas por severidad. El total solo no dice nada: un VP con 200 Low
  * y otro con 200 Critical se ven idénticos en una barra simple.

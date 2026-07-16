@@ -3,33 +3,32 @@ import { supabase, hasSupabase } from "./supabase";
 import { ingestFile, SOURCES, SourceId, IngestResult } from "./lib/ingest";
 import { Donut, StackH, Aging, KRI_COLORS } from "./Charts";
 import {
-  AlertOctagon, Layers, RotateCcw, ShieldAlert, ShieldX, CircleAlert, Scale,
+  AlertOctagon, Layers, ShieldX, Scale,
   Loader2, Search, CheckCircle2, AlertTriangle, X, ChevronLeft, ChevronRight,
 } from "lucide-react";
 
-function AlertIcon({ kind }: { kind: string }) {
-  const p = { size: 15 };
-  if (kind === "kev") return <ShieldAlert {...p} className="i-red" />;
-  if (kind === "appsec_critical") return <AlertOctagon {...p} className="i-red" />;
-  if (kind === "resurfaced") return <RotateCcw {...p} className="i-red" />;
-  if (kind === "policy") return <ShieldX {...p} className="i-blue" />;
-  return <CircleAlert {...p} className="i-amber" />;
-}
-
 type Profile = { scotiaId: string; name: string };
 type Finding = {
-  id: string; finding_key: string; source: string; epm: string | null; asset: string | null;
+  finding_key: string; source: string; epm: string | null; asset: string | null;
   title: string; cve: string | null; severity_scanner: string | null; severity_scotia: string | null;
   status: string; first_observed: string; kri_status: string | null; remaining_days: number | null;
-  area: string | null; plataforma: string | null; responsable: string | null;
   it_vp: string | null; it_manager: string | null; app_name: string | null;
-  sla_days: number | null; exposed_internet: boolean | null;
+  sla_days: number | null; edad_dias: number; vencido_real: boolean; usage: string | null;
 };
-type Alert = { id: string; kind: string; message: string; severity: string | null; acknowledged: boolean; created_at: string };
+type Activity = {
+  id: number; at: string; event: string; finding_key: string; de: string | null; a: string | null;
+  title: string | null; asset: string | null; app_name: string | null; it_vp: string | null;
+  severity_scanner: string | null; source_file: string | null; loaded_by: string | null;
+};
+type Load = {
+  load_id: string; state: string; started_at: string; loaded_by: string | null;
+  source_file: string | null; data_date: string | null; rows_seen: number;
+  rows_closed: number; epms_seen: number; blocked_reason: string | null;
+};
 type AppScan = { source: string; project_name: string; epm: string | null; policy_status: string | null; risk_level: string | null; crit: number; high: number; med: number; low: number };
 const PROFILE_KEY = "scotia_profile";
 const SEVS = ["Critical", "High", "Medium", "Low"];
-const STATUSES = ["open", "resurfaced", "fixed"];
+const STATUSES = ["open", "resurfaced", "fixed", "not_observed"];
 const sevClass = (s?: string | null) => `sev sev-${(s || "").toLowerCase()}`;
 
 // ---------- Login ----------
@@ -144,8 +143,7 @@ function Upload({ onDone }: { onDone: () => void }) {
 // ---------- Dashboard (métricas + gráficas filtrables) ----------
 const EMPTY_M = { kpi: {}, by_severity: [], by_kri: [], by_it_vp: [], by_it_manager: [], by_app: [], by_age: [] };
 const EMPTY_F = {
-  it_vp: "", it_manager: "", app: "", severity: "", kri: "",
-  status: "", source: "", area: "", plataforma: "", responsable: "",
+  it_vp: "", it_manager: "", app: "", severity: "", kri: "", status: "", usage: "",
 };
 type Org = { it_vp: string; it_manager: string; app_name: string; epm: string; abiertos: number };
 
@@ -176,24 +174,24 @@ function Dashboard() {
     const { data } = await supabase.rpc("dashboard_metrics", {
       p_it_vp: g.it_vp || null, p_it_manager: g.it_manager || null, p_app: g.app || null,
       p_severity: g.severity || null, p_kri: g.kri || null, p_status: g.status || null,
-      p_source: g.source || null, p_area: g.area || null,
-      p_plataforma: g.plataforma || null, p_responsable: g.responsable || null,
+      p_usage: g.usage || null,
     });
     setM(data ?? EMPTY_M);
     const [d, rc, c, sc] = await Promise.all([
-      supabase.from("v_hidden_debt").select("asset,title,true_age_days,sla_days,it_vp").order("true_age_days", { ascending: false }).limit(8),
-      supabase.from("v_recast").select("title,asset,severity_scanner,severity_scotia,it_vp").limit(8),
+      supabase.from("v_hidden_debt").select("asset,title,edad_dias,sla_days,it_vp").order("edad_dias", { ascending: false }).limit(8),
+      supabase.from("v_recast_log").select("*").order("at", { ascending: false }).limit(8),
       supabase.from("v_cross_layer").select("*").order("capas", { ascending: false }).limit(8),
-      supabase.from("app_scans").select("*").order("crit", { ascending: false }).limit(30),
+      supabase.from("v_app_scans").select("*").order("crit", { ascending: false }).limit(30),
     ]);
     setDebt(d.data ?? []); setRecast(rc.data ?? []);
     setCross(c.data ?? []); setScans((sc.data ?? []) as AppScan[]);
   }
   useEffect(() => { load(); }, [f]);
   useEffect(() => {
+    // Solo el acta: una carga movía 63,600 filas de findings y cada una emitía
+    // un mensaje de realtime evaluado contra RLS por suscriptor.
     const ch = supabase.channel("dash")
-      .on("postgres_changes", { event: "*", schema: "public", table: "findings" }, () => load())
-      .on("postgres_changes", { event: "*", schema: "public", table: "app_scans" }, () => load())
+      .on("postgres_changes", { event: "*", schema: "bronze", table: "loads" }, () => load())
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, []);
@@ -241,14 +239,8 @@ function Dashboard() {
         <select value={f.status} onChange={(e) => set("status", e.currentTarget.value)}>
           <option value="">Estado</option>{STATUSES.map((s) => <option key={s}>{s}</option>)}
         </select>
-        <select value={f.source} onChange={(e) => set("source", e.currentTarget.value)}>
-          <option value="">Fuente</option>{SOURCES.map((s) => <option key={s.id} value={s.id}>{s.id}</option>)}
-        </select>
-        <select value={f.area} onChange={(e) => set("area", e.currentTarget.value)}>
-          <option value="">Área</option>{(opts.area ?? []).map((a) => <option key={a}>{a}</option>)}
-        </select>
-        <select value={f.responsable} onChange={(e) => set("responsable", e.currentTarget.value)}>
-          <option value="">Responsable</option>{(opts.responsable ?? []).map((a) => <option key={a}>{a}</option>)}
+        <select value={f.usage} onChange={(e) => set("usage", e.currentTarget.value)}>
+          <option value="">Ambiente</option>{(opts.usage ?? []).map((a) => <option key={a}>{a}</option>)}
         </select>
         {active && <button className="ghost btn-i" onClick={() => setF(EMPTY_F)}><X size={14} /> Limpiar</button>}
       </div>
@@ -256,11 +248,13 @@ function Dashboard() {
       <div className="kpis">
         <Kpi n={kpi.abiertos ?? 0} label="Abiertos" />
         <Kpi n={kpi.criticos ?? 0} label="Críticos" tone="red" />
-        <Kpi n={kpi.fuera_sla ?? 0} label="Fuera de SLA" tone="red" />
+        <Kpi n={kpi.vencidos ?? 0} label="Vencidos (SLA real)" tone="red" />
+        <Kpi n={kpi.deuda_oculta ?? 0} label="Deuda oculta" tone="red" />
         <Kpi n={kpi.resurfaced ?? 0} label="Resurfaced" tone="amber" />
-        <Kpi n={kpi.expuestos ?? 0} label="Expuestos a internet" tone="amber" />
+        <Kpi n={kpi.no_observados ?? 0} label="No observados" tone="amber" />
+        <Kpi n={kpi.prod ?? 0} label="En producción" />
+        <Kpi n={kpi.expuestos ?? 0} label="Expuestos" tone="amber" />
         <Kpi n={kpi.vps ?? 0} label="IT VP" />
-        <Kpi n={kpi.managers ?? 0} label="IT Manager" />
         <Kpi n={kpi.apps ?? 0} label="Aplicaciones" />
       </div>
 
@@ -294,13 +288,13 @@ function Dashboard() {
       {debt.length > 0 && (
         <Insight icon={<AlertOctagon size={15} className="i-red" />} title="Deuda oculta (KRI dice IN_TIME pero ya vencieron)" items={debt.map((d: any) => ({
           key: d.asset + d.title, main: d.title,
-          meta: `${d.asset} · ${d.true_age_days}d reales vs SLA ${d.sla_days}d · ${d.it_vp ?? "sin VP"}`,
+          meta: `${d.asset} · ${d.edad_dias}d reales vs SLA ${d.sla_days}d · ${d.it_vp ?? "sin VP"}`,
         }))} />
       )}
       {recast.length > 0 && (
-        <Insight icon={<Scale size={15} className="i-amber" />} title="Recast sospechoso (el scanner dice Critical/High, Scotia lo bajó a Low)" items={recast.map((r: any) => ({
-          key: r.asset + r.title, main: r.title,
-          meta: `${r.severity_scanner} → ${r.severity_scotia} · ${r.asset} · ${r.it_vp ?? "sin VP"}`,
+        <Insight icon={<Scale size={15} className="i-amber" />} title="Recast: el banco cambió la severidad (quién y cuándo)" items={recast.map((r: any) => ({
+          key: r.finding_key + r.at, main: r.title ?? r.finding_key,
+          meta: `escáner: ${r.severidad_escaner} · banco: ${r.severidad_antes ?? "—"} → ${r.severidad_despues} · ${r.loaded_by ?? "?"} el ${(r.at ?? "").slice(0, 10)}`,
         }))} />
       )}
       {cross.length > 0 && (
@@ -402,7 +396,7 @@ function Hallazgos() {
           <thead><tr><th>Sev</th><th>Estado</th><th>Activo</th><th>Título</th><th>App</th><th>IT VP</th><th>IT Manager</th><th>KRI</th></tr></thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.id}>
+              <tr key={r.finding_key}>
                 <td><span className={sevClass(r.severity_scanner)}>{r.severity_scanner ?? "—"}</span></td>
                 <td><span className={`st st-${r.status}`}>{r.status}</span></td>
                 <td className="mono">{r.asset}</td>
@@ -428,32 +422,116 @@ function Hallazgos() {
   );
 }
 
-// ---------- Alertas ----------
-function Alerts() {
-  const [alerts, setAlerts] = useState<Alert[]>([]);
+// ---------- Actividad (la bitácora) + acta de cargas ----------
+// Reemplaza la pestaña de Alertas. Antes eran alertas que la ingesta inventaba
+// al vuelo; ahora son los cambios que de verdad ocurrieron, con su carga y autor.
+const EV: Record<string, { txt: string; cls: string }> = {
+  new: { txt: "nuevo", cls: "amber" },
+  fixed: { txt: "remediado", cls: "green" },
+  resurfaced: { txt: "reabierto", cls: "red" },
+  not_observed: { txt: "no observado", cls: "amber" },
+  reobserved: { txt: "reaparece", cls: "amber" },
+  recast: { txt: "recast", cls: "red" },
+  reassigned: { txt: "reasignado", cls: "blue" },
+  sla_changed: { txt: "cambió SLA", cls: "blue" },
+};
+
+function Actividad() {
+  const [rows, setRows] = useState<Activity[]>([]);
+  const [loads, setLoads] = useState<Load[]>([]);
+  const [ev, setEv] = useState("");
+
   async function load() {
-    const { data } = await supabase.from("alerts").select("*").order("created_at", { ascending: false }).limit(300);
-    setAlerts((data ?? []) as Alert[]);
+    let q = supabase.from("v_activity").select("*").order("at", { ascending: false }).limit(200);
+    if (ev) q = q.eq("event", ev);
+    const [a, l] = await Promise.all([
+      q, supabase.from("v_loads").select("*").order("started_at", { ascending: false }).limit(12),
+    ]);
+    setRows((a.data ?? []) as Activity[]);
+    setLoads((l.data ?? []) as Load[]);
   }
+  useEffect(() => { load(); }, [ev]);
   useEffect(() => {
-    load();
-    const ch = supabase.channel("al").on("postgres_changes", { event: "*", schema: "public", table: "alerts" }, () => load()).subscribe();
+    const ch = supabase.channel("act")
+      .on("postgres_changes", { event: "*", schema: "bronze", table: "loads" }, () => load())
+      .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, []);
-  async function ack(id: string) { await supabase.from("alerts").update({ acknowledged: true }).eq("id", id); load(); }
+
+  const frenadas = loads.filter((l) => l.state === "pending_review");
+
   return (
-    <div className="panel">
-      <h2>Alertas ({alerts.filter((a) => !a.acknowledged).length} sin atender)</h2>
-      <ul className="alerts">
-        {alerts.map((a) => (
-          <li key={a.id} className={`alert ${a.acknowledged ? "ack" : ""}`}>
-            <span className={`akind akind-${a.kind}`}><AlertIcon kind={a.kind} />{a.kind}</span>
-            <span className="amsg">{a.message}</span>
-            {!a.acknowledged && <button className="ghost" onClick={() => ack(a.id)}>Atender</button>}
-          </li>
-        ))}
-        {!alerts.length && <li className="empty">Sin alertas.</li>}
-      </ul>
+    <div>
+      {frenadas.length > 0 && (
+        <div className="panel">
+          <h3><AlertTriangle size={15} className="i-amber" /> Cargas frenadas ({frenadas.length})</h3>
+          <p className="hint">Nada se cerró. Revisa el motivo antes de reintentar.</p>
+          <ul className="alerts">
+            {frenadas.map((l) => (
+              <li key={l.load_id} className="alert">
+                <span className="akind akind-policy"><ShieldX size={15} className="i-amber" />frenada</span>
+                <span className="amsg"><b>{l.source_file}</b> · {l.blocked_reason}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="panel">
+        <h3>Acta de cargas</h3>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr><th>Archivo</th><th>Estado</th><th>Fecha del dato</th><th>Filas</th>
+              <th>No obs.</th><th>Apps</th><th>Por</th><th>Cuándo</th></tr></thead>
+            <tbody>
+              {loads.map((l) => (
+                <tr key={l.load_id}>
+                  <td className="clip">{l.source_file ?? "—"}</td>
+                  <td><span className={`st st-${l.state}`}>{l.state}</span></td>
+                  <td className="mono">{l.data_date?.slice(0, 10) ?? "—"}</td>
+                  <td>{l.rows_seen.toLocaleString()}</td>
+                  <td className={l.rows_closed ? "warn" : ""}>{l.rows_closed.toLocaleString()}</td>
+                  <td>{l.epms_seen}</td>
+                  <td>{l.loaded_by ?? "—"}</td>
+                  <td className="mono">{l.started_at.slice(0, 16).replace("T", " ")}</td>
+                </tr>
+              ))}
+              {!loads.length && <tr><td colSpan={8} className="empty">Sin cargas todavía.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="filters-bar">
+          <h3 className="grow">Bitácora</h3>
+          <select value={ev} onChange={(e) => setEv(e.currentTarget.value)}>
+            <option value="">Todos los eventos</option>
+            {Object.entries(EV).map(([k, v]) => <option key={k} value={k}>{v.txt}</option>)}
+          </select>
+        </div>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr><th>Cuándo</th><th>Evento</th><th>Hallazgo</th><th>App</th>
+              <th>IT VP</th><th>Cambio</th><th>Carga</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td className="mono">{r.at.slice(0, 16).replace("T", " ")}</td>
+                  <td><span className={`akind akind-${EV[r.event]?.cls ?? "blue"}`}>
+                    {EV[r.event]?.txt ?? r.event}</span></td>
+                  <td className="clip">{r.title ?? r.finding_key}</td>
+                  <td className="clip">{r.app_name ?? "—"}</td>
+                  <td>{r.it_vp ?? "—"}</td>
+                  <td className="mono">{r.de ? `${r.de} → ${r.a}` : (r.a ?? "—")}</td>
+                  <td className="clip">{r.source_file ?? "—"}{r.loaded_by ? ` · ${r.loaded_by}` : ""}</td>
+                </tr>
+              ))}
+              {!rows.length && <tr><td colSpan={7} className="empty">Sin actividad.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
@@ -477,7 +555,7 @@ function App() {
     const raw = localStorage.getItem(PROFILE_KEY);
     return raw ? (JSON.parse(raw) as Profile) : null;
   });
-  const [tab, setTab] = useState<"dash" | "find" | "upload" | "alerts">("dash");
+  const [tab, setTab] = useState<"dash" | "find" | "upload" | "act">("dash");
   const [reload, setReload] = useState(0);
 
   if (!hasSupabase) return <main className="login"><div className="login-card"><h1 className="login-brand">Falta Supabase</h1></div></main>;
@@ -496,12 +574,12 @@ function App() {
         <button className={tab === "dash" ? "active" : ""} onClick={() => setTab("dash")}>Dashboard</button>
         <button className={tab === "find" ? "active" : ""} onClick={() => setTab("find")}>Hallazgos</button>
         <button className={tab === "upload" ? "active" : ""} onClick={() => setTab("upload")}>Cargar CSV</button>
-        <button className={tab === "alerts" ? "active" : ""} onClick={() => setTab("alerts")}>Alertas</button>
+        <button className={tab === "act" ? "active" : ""} onClick={() => setTab("act")}>Actividad</button>
       </nav>
       {tab === "dash" && <Dashboard key={reload} />}
       {tab === "find" && <Hallazgos />}
       {tab === "upload" && <Upload onDone={() => setReload((r) => r + 1)} />}
-      {tab === "alerts" && <Alerts />}
+      {tab === "act" && <Actividad />}
     </main>
   );
 }

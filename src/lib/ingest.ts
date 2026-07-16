@@ -15,6 +15,12 @@ const num = (v?: string) => {
   return isNaN(n) ? null : n;
 };
 const int = (v?: string) => Math.trunc(num(v) ?? 0);
+// Postgres no castea '100.0' a int. num() devuelve float, así que los campos
+// enteros se mandan ya truncados en vez de confiar en el cast del otro lado.
+const intOrNull = (v?: string) => {
+  const n = num(v);
+  return n === null ? null : Math.trunc(n);
+};
 
 // Tenable escribe "TBD"/"None" como texto, no como celda vacía.
 const PLACEHOLDERS = new Set(["", "tbd", "none", "n/a", "na", "-"]);
@@ -88,12 +94,12 @@ const mapTenable = (o: Obj) => ({
   last_fixed: nn(o["last_fixed"]),
   resurfaced_date: nn(o["resurfaced_date"]),
   recast_reason: nn(o["recast_reason"]),
-  age_in_days: num(o["age_in_days"]),
+  age_in_days: intOrNull(o["age_in_days"]),
 
   // SLA / KRI
   kri_status: nn(o["KRI_STATUS"]),
   sla_days: slaDays(o["Remediation time"]),
-  remaining_days: num(o["Remaining days"]),
+  remaining_days: intOrNull(o["Remaining days"]),
 
   // jerarquía organizacional: el eje del filtrado
   epm: nn(o["EPM Code"]),
