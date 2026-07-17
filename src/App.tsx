@@ -587,10 +587,17 @@ const PRIOS: Record<string, { txt: string; cls: string }> = {
   normal: { txt: "Normal", cls: "b" }, low: { txt: "Baja", cls: "g" },
 };
 
+type VFinding = {
+  finding_key: string; asset: string | null; title: string; cve: string | null;
+  severity_scanner: string | null; vpr: number | null; status: string;
+  kri_status: string | null; sla_days: number | null; edad_dias: number; vencido_real: boolean;
+  es_falso_positivo: boolean; es_riesgo_aceptado: boolean; acepta_vence: string | null;
+};
+
 function Gestion() {
   const [rows, setRows] = useState<AppGestion[]>([]);
   const [f, setF] = useState({ estado: "", vp: "", solo_criticos: false });
-  const [sel, setSel] = useState<AppGestion | null>(null);
+  const [selEpm, setSelEpm] = useState<string | null>(null);
 
   async function load() {
     const { data } = await supabase.from("v_app_gestion").select("*")
@@ -605,213 +612,338 @@ function Gestion() {
     return () => { supabase.removeChannel(ch); };
   }, []);
 
+  if (selEpm) return <AppDetail epm={selEpm} onBack={() => { setSelEpm(null); load(); }} />;
+
   const vps = [...new Set(rows.map((r) => r.it_vp).filter(Boolean) as string[])].sort();
   const vista = rows.filter((r) =>
     (!f.estado || r.workflow_state === f.estado) &&
     (!f.vp || r.it_vp === f.vp) &&
     (!f.solo_criticos || r.criticos > 0));
 
-  // refresca la app seleccionada cuando cambie la lista (tras una acción)
-  useEffect(() => {
-    if (sel) { const u = rows.find((r) => r.epm === sel.epm); if (u) setSel(u); }
-  }, [rows]); // eslint-disable-line
-
   return (
-    <div>
-      <div className="panel">
-        <div className="filters-bar">
-          <h2 className="grow">Gestión de remediación · {vista.length} apps</h2>
-          <select value={f.vp} onChange={(e) => setF((p) => ({ ...p, vp: e.currentTarget.value }))}>
-            <option value="">Todos los IT VP</option>{vps.map((v) => <option key={v}>{v}</option>)}
-          </select>
-          <select value={f.estado} onChange={(e) => setF((p) => ({ ...p, estado: e.currentTarget.value }))}>
-            <option value="">Todo estado</option>{WF_ESTADOS.map((s) => <option key={s} value={s}>{WF[s].txt}</option>)}
-          </select>
-          <button className={`chip-toggle ${f.solo_criticos ? "on" : ""}`}
-            onClick={() => setF((p) => ({ ...p, solo_criticos: !p.solo_criticos }))}>Solo con críticos</button>
-        </div>
-        <p className="hint">El riesgo (críticos, vencidos) lo dice el escáner. El estado es el seguimiento del equipo — no cambia el número.</p>
-        <div className="tbl-wrap">
-          <table className="tbl">
-            <thead><tr><th className="num">Risk</th><th>App</th><th>IT VP</th><th>Estado</th><th>Asignado</th>
-              <th className="num">Crít</th><th className="num">Venc.</th><th className="num">Abiertos</th><th></th></tr></thead>
-            <tbody>
-              {vista.map((r) => (
-                <tr key={r.epm} className={sel?.epm === r.epm ? "sel" : ""}>
-                  <td className="num"><Risk score={r.risk_score} /></td>
-                  <td className="clip">{r.app_name ?? r.epm}
-                    {r.exposed_internet ? <span className="badge badge-exp" title="Expuesta a internet">internet</span> : null}
-                    {r.mx_regulatory ? <span className="badge badge-reg" title="App regulatoria (CNBV)">reg</span> : null}</td>
-                  <td className="clip">{r.it_vp ?? "—"}</td>
-                  <td>
-                    <span className={`akind akind-${WF[r.workflow_state]?.cls ?? "gris"}`}>{WF[r.workflow_state]?.txt ?? r.workflow_state}</span>
-                    {r.priority && r.priority !== "normal" ? <span className={`prio prio-${PRIOS[r.priority]?.cls}`} title={`Prioridad ${PRIOS[r.priority]?.txt}`}>⚑</span> : null}
-                    {r.watchers > 0 ? <span className="obs-count" title={`${r.watchers} observador(es)`}>👁 {r.watchers}</span> : null}
-                    {r.commitment_date ? <span className={`due ${r.compromiso_vencido ? "due-venc" : ""}`} title="Fecha de compromiso">{r.commitment_date.slice(5)}</span> : null}
-                  </td>
-                  <td>{r.assignee ?? "—"}</td>
-                  <td className={`num ${r.criticos ? "hot" : ""}`}>{r.criticos}</td>
-                  <td className={`num ${r.vencidos ? "warn" : ""}`}>{r.vencidos}</td>
-                  <td className="num">{r.abiertos}</td>
-                  <td><button className="ghost btn-i" onClick={() => setSel(r)}>Gestionar</button></td>
-                </tr>
-              ))}
-              {!vista.length && <tr><td colSpan={9} className="empty">Sin apps. Carga un escaneo.</td></tr>}
-            </tbody>
-          </table>
-        </div>
+    <div className="panel">
+      <div className="filters-bar">
+        <h2 className="grow">Cola de remediación · {vista.length} apps</h2>
+        <select value={f.vp} onChange={(e) => setF((p) => ({ ...p, vp: e.currentTarget.value }))}>
+          <option value="">Todos los IT VP</option>{vps.map((v) => <option key={v}>{v}</option>)}
+        </select>
+        <select value={f.estado} onChange={(e) => setF((p) => ({ ...p, estado: e.currentTarget.value }))}>
+          <option value="">Todo estado</option>{WF_ESTADOS.map((s) => <option key={s} value={s}>{WF[s].txt}</option>)}
+        </select>
+        <button className={`chip-toggle ${f.solo_criticos ? "on" : ""}`}
+          onClick={() => setF((p) => ({ ...p, solo_criticos: !p.solo_criticos }))}>Solo con críticos</button>
       </div>
-      {sel && <GestionApp app={sel} onClose={() => setSel(null)} onChange={load} />}
+      <p className="hint">El riesgo (críticos, vencidos) lo dice el escáner. El estado es el seguimiento del equipo — no cambia el número. Clic en una app para gestionarla.</p>
+      <div className="tbl-wrap">
+        <table className="tbl tbl-click">
+          <thead><tr><th className="num">Risk</th><th>App</th><th>IT VP</th><th>Estado</th><th>Asignado</th>
+            <th className="num">Crít</th><th className="num">Venc.</th><th className="num">Abiertos</th></tr></thead>
+          <tbody>
+            {vista.map((r) => (
+              <tr key={r.epm} onClick={() => setSelEpm(r.epm)}>
+                <td className="num"><Risk score={r.risk_score} /></td>
+                <td className="clip">{r.app_name ?? r.epm}
+                  {r.exposed_internet ? <span className="badge badge-exp" title="Expuesta a internet">internet</span> : null}
+                  {r.mx_regulatory ? <span className="badge badge-reg" title="App regulatoria (CNBV)">reg</span> : null}</td>
+                <td className="clip">{r.it_vp ?? "—"}</td>
+                <td>
+                  <span className={`akind akind-${WF[r.workflow_state]?.cls ?? "gris"}`}>{WF[r.workflow_state]?.txt ?? r.workflow_state}</span>
+                  {r.priority && r.priority !== "normal" ? <span className={`prio prio-${PRIOS[r.priority]?.cls}`} title={`Prioridad ${PRIOS[r.priority]?.txt}`}>⚑</span> : null}
+                  {r.watchers > 0 ? <span className="obs-count" title={`${r.watchers} observador(es)`}>👁 {r.watchers}</span> : null}
+                  {r.commitment_date ? <span className={`due ${r.compromiso_vencido ? "due-venc" : ""}`} title="Fecha de compromiso">{r.commitment_date.slice(5)}</span> : null}
+                </td>
+                <td>{r.assignee ?? "—"}</td>
+                <td className={`num ${r.criticos ? "hot" : ""}`}>{r.criticos}</td>
+                <td className={`num ${r.vencidos ? "warn" : ""}`}>{r.vencidos}</td>
+                <td className="num">{r.abiertos}</td>
+              </tr>
+            ))}
+            {!vista.length && <tr><td colSpan={8} className="empty">Sin apps. Carga un escaneo.</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
-// Panel de una app: cambiar estado, asignar, fechas, observadores, comentar, historial.
-function GestionApp({ app, onClose, onChange }: { app: AppGestion; onClose: () => void; onChange: () => void }) {
+const APP_TABS = [
+  { id: "seg", txt: "Seguimiento" }, { id: "vuln", txt: "Vulnerabilidades" },
+  { id: "act", txt: "Actividad" }, { id: "cont", txt: "Contactos" },
+] as const;
+
+// Página de detalle de una app: cabecera identidad+riesgo + pestañas.
+function AppDetail({ epm, onBack }: { epm: string; onBack: () => void }) {
+  const [app, setApp] = useState<AppGestion | null>(null);
   const [log, setLog] = useState<WfEvent[]>([]);
   const [watchers, setWatchers] = useState<Watcher[]>([]);
-  const [asignado, setAsignado] = useState(app.assignee ?? "");
+  const [vulns, setVulns] = useState<VFinding[]>([]);
+  const [tab, setTab] = useState<string>("seg");
+
+  async function recargar() {
+    const [a, l, w, v] = await Promise.all([
+      supabase.from("v_app_gestion").select("*").eq("epm", epm).single(),
+      supabase.from("v_workflow_log").select("*").eq("epm", epm).order("at", { ascending: false }).limit(100),
+      supabase.from("v_app_watchers").select("*").eq("epm", epm),
+      supabase.from("v_findings").select("finding_key,asset,title,cve,severity_scanner,vpr,status,kri_status,sla_days,edad_dias,vencido_real,es_falso_positivo,es_riesgo_aceptado,acepta_vence")
+        .eq("epm", epm).order("vpr", { ascending: false, nullsFirst: false }),
+    ]);
+    setApp((a.data ?? null) as AppGestion | null);
+    setLog((l.data ?? []) as WfEvent[]); setWatchers((w.data ?? []) as Watcher[]);
+    setVulns((v.data ?? []) as VFinding[]);
+  }
+  useEffect(() => { recargar(); }, [epm]);
+
+  if (!app) return <div className="panel"><Loader2 size={18} className="spin" /></div>;
+  const discrepancia = (app.workflow_state === "atendido" || app.workflow_state === "en_atencion") && app.criticos > 0;
+
+  return (
+    <div>
+      <button className="ghost btn-i back-btn" onClick={onBack}><ChevronLeft size={15} /> Volver a la cola</button>
+      <div className="app-header">
+        <div className="app-title-row">
+          <div>
+            <h2>{app.app_name ?? app.epm}
+              {app.exposed_internet ? <span className="badge badge-exp">internet</span> : null}
+              {app.mx_regulatory ? <span className="badge badge-reg">regulatoria</span> : null}
+              {app.usage ? <span className="badge badge-neutral">{app.usage}</span> : null}
+              {app.tier ? <span className="badge badge-neutral">Tier {app.tier}</span> : null}
+            </h2>
+            <span className="hint">{app.epm} · {app.it_vp ?? "sin VP"} › {app.it_manager ?? "sin manager"}</span>
+          </div>
+          <div className="app-state-big">
+            <span className={`akind akind-${WF[app.workflow_state]?.cls ?? "gris"}`}>{WF[app.workflow_state]?.txt ?? app.workflow_state}</span>
+            {app.priority && app.priority !== "normal" ? <span className={`prio prio-${PRIOS[app.priority]?.cls}`}>⚑ {PRIOS[app.priority]?.txt}</span> : null}
+            {app.watchers > 0 ? <span className="obs-count">👁 {app.watchers}</span> : null}
+          </div>
+        </div>
+        <div className="app-metrics">
+          <div className="am"><div className="am-n"><Risk score={app.risk_score} /></div><div className="am-l">Risk</div></div>
+          <div className={`am ${app.criticos ? "am-red" : ""}`}><div className="am-n">{app.criticos}</div><div className="am-l">Críticos</div></div>
+          <div className={`am ${app.vencidos ? "am-red" : ""}`}><div className="am-n">{app.vencidos}</div><div className="am-l">Vencidos SLA</div></div>
+          <div className="am"><div className="am-n">{app.abiertos}</div><div className="am-l">Abiertos</div></div>
+          <div className="am am-soft"><div className="am-l">— lo dice el escáner</div>
+            <div className="am-sub">Asignado: <b>{app.assignee ?? "—"}</b>{app.commitment_date ? <> · Compromiso <b className={app.compromiso_vencido ? "i-red" : ""}>{app.commitment_date}</b></> : null}</div></div>
+        </div>
+        {discrepancia && (
+          <div className="discrepancia"><AlertTriangle size={15} />
+            Marcada <b>{WF[app.workflow_state]?.txt}</b> pero el escáner ve <b>{app.criticos} crítico(s) abiertos</b> — el fix no está confirmado. Marcar atendido NO cierra hallazgos: solo el próximo escaneo.</div>
+        )}
+        <nav className="app-tabs">
+          {APP_TABS.map((t) => (
+            <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
+              {t.txt}{t.id === "vuln" ? ` · ${app.abiertos}` : ""}</button>
+          ))}
+        </nav>
+      </div>
+
+      {tab === "seg" && <SeguimientoTab app={app} log={log} watchers={watchers} onChange={recargar} />}
+      {tab === "vuln" && <VulnsTab vulns={vulns} onChange={recargar} />}
+      {tab === "act" && <div className="panel"><h3>Historial completo</h3><Timeline log={log} /></div>}
+      {tab === "cont" && <ContactosTab app={app} watchers={watchers} />}
+    </div>
+  );
+}
+
+// Pestaña Seguimiento: timeline (lectura) + panel de acciones (escritura).
+function SeguimientoTab({ app, log, watchers, onChange }: { app: AppGestion; log: WfEvent[]; watchers: Watcher[]; onChange: () => void }) {
   const [comentario, setComentario] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function correr(fn: () => PromiseLike<{ error: any }>) {
+    setBusy(true); const { error } = await fn(); setBusy(false);
+    if (error) { alert(error.message); return; }
+    onChange();
+  }
+  const comentar = () => { if (comentario) correr(() => supabase.rpc("wf_comment", { p_epm: app.epm, p_comment: comentario }).then((r) => { setComentario(""); return r; })); };
+  return (
+    <div className="seguimiento-grid">
+      <div className="panel">
+        <h3>Bitácora</h3>
+        <div className="coment-box">
+          <input value={comentario} onChange={(e) => setComentario(e.currentTarget.value)}
+            placeholder="Escribir comentario…" onKeyDown={(e) => e.key === "Enter" && comentar()} />
+          <button onClick={comentar} disabled={busy || !comentario}>Comentar</button>
+        </div>
+        <Timeline log={log} />
+      </div>
+      <AccionesPanel app={app} watchers={watchers} onChange={onChange} />
+    </div>
+  );
+}
+
+// Panel derecho: 4 cards de acción, cada una con su título.
+function AccionesPanel({ app, watchers, onChange }: { app: AppGestion; watchers: Watcher[]; onChange: () => void }) {
+  const [asignado, setAsignado] = useState(app.assignee ?? "");
   const [motivo, setMotivo] = useState(app.blocked_reason ?? "");
   const [fecha, setFecha] = useState(app.commitment_date ?? "");
   const [prio, setPrio] = useState(app.priority ?? "normal");
   const [nuevoObs, setNuevoObs] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-
-  async function recargar() {
-    const [l, w] = await Promise.all([
-      supabase.from("v_workflow_log").select("*").eq("epm", app.epm).order("at", { ascending: false }).limit(50),
-      supabase.from("v_app_watchers").select("*").eq("epm", app.epm),
-    ]);
-    setLog((l.data ?? []) as WfEvent[]); setWatchers((w.data ?? []) as Watcher[]);
-  }
-  useEffect(() => {
-    recargar(); setAsignado(app.assignee ?? ""); setMotivo(app.blocked_reason ?? "");
-    setFecha(app.commitment_date ?? ""); setPrio(app.priority ?? "normal");
-  }, [app.epm]);
+  useEffect(() => { setAsignado(app.assignee ?? ""); setMotivo(app.blocked_reason ?? ""); setFecha(app.commitment_date ?? ""); setPrio(app.priority ?? "normal"); }, [app.epm]);
 
   async function correr(fn: () => PromiseLike<{ error: any }>) {
-    setBusy(true); setErr("");
-    const { error } = await fn();
-    setBusy(false);
+    setBusy(true); setErr(""); const { error } = await fn(); setBusy(false);
     if (error) { setErr(error.message); return false; }
-    await recargar(); onChange(); return true;
+    onChange(); return true;
   }
-  const asignar = () => correr(() => supabase.rpc("wf_assign", { p_epm: app.epm, p_assignee: asignado }));
-  const setEstado = (estado: string) => correr(() => supabase.rpc("wf_set_state",
-    { p_epm: app.epm, p_state: estado, p_comment: comentario || null, p_blocked_reason: motivo || null }))
-    .then((ok) => { if (ok) setComentario(""); });
-  const comentar = async () => { if (await correr(() => supabase.rpc("wf_comment", { p_epm: app.epm, p_comment: comentario }))) setComentario(""); };
-  const guardarFecha = () => correr(() => supabase.rpc("wf_set_due",
-    { p_epm: app.epm, p_commitment_date: fecha || null, p_priority: prio }));
-  const agregarObs = async () => { if (await correr(() => supabase.rpc("wf_watch",
-    { p_epm: app.epm, p_watcher_id: nuevoObs, p_watcher_type: "persona" }))) setNuevoObs(""); };
-  const quitarObs = (w: Watcher) => correr(() => supabase.rpc("wf_watch",
-    { p_epm: app.epm, p_watcher_id: w.watcher_id, p_watcher_type: w.watcher_type, p_remove: true }));
-
+  const bloqueando = false;
+  const setEstado = (s: string) => correr(() => supabase.rpc("wf_set_state", { p_epm: app.epm, p_state: s, p_blocked_reason: motivo || null }));
   return (
-    <div className="drawer">
-      <div className="drawer-h">
-        <div>
-          <h3>{app.app_name ?? app.epm}</h3>
-          <span className="hint">{app.epm} · {app.it_vp ?? "sin VP"} · {app.it_manager ?? "sin manager"}</span>
-        </div>
-        <button className="ghost btn-i" onClick={onClose}><X size={15} /> Cerrar</button>
-      </div>
-
-      <div className="drawer-risk">
-        <span className="hot">{app.criticos} críticos</span>
-        <span className="warn">{app.vencidos} vencidos</span>
-        <span>{app.abiertos} abiertos</span>
-        {app.exposed_internet && <span className="tag-exp">expuesta a internet</span>}
-        <span className="hint">— lo dice el escáner</span>
-      </div>
-
-      <div className="drawer-sec">
-        <label>Asignar remediación a</label>
-        <div className="row-inline">
-          <input value={asignado} onChange={(e) => setAsignado(e.currentTarget.value)}
-            placeholder="Nombre del responsable" />
-          <button onClick={asignar} disabled={busy}>Asignar</button>
-        </div>
-      </div>
-
-      <div className="drawer-sec">
+    <div className="acciones">
+      <div className="action-card">
         <label>Estado del seguimiento</label>
         <div className="wf-btns">
           {WF_ESTADOS.map((s) => (
-            <button key={s} disabled={busy}
-              className={`wf-btn wf-${WF[s].cls} ${app.workflow_state === s ? "on" : ""}`}
+            <button key={s} disabled={busy} className={`wf-btn wf-${WF[s].cls} ${app.workflow_state === s ? "on" : ""}`}
               onClick={() => setEstado(s)}>{WF[s].txt}</button>
           ))}
         </div>
         <input className="mt" value={motivo} onChange={(e) => setMotivo(e.currentTarget.value)}
           placeholder="Motivo del bloqueo (obligatorio para 'Torre no atiende')" />
       </div>
-
-      <div className="drawer-sec">
+      <div className="action-card">
+        <label>Responsable</label>
+        <div className="row-inline">
+          <input value={asignado} onChange={(e) => setAsignado(e.currentTarget.value)} placeholder="Nombre del responsable" />
+          <button onClick={() => correr(() => supabase.rpc("wf_assign", { p_epm: app.epm, p_assignee: asignado }))} disabled={busy}>Asignar</button>
+        </div>
+      </div>
+      <div className="action-card">
         <label>Fecha de compromiso y prioridad</label>
         <div className="row-inline">
           <input type="date" value={fecha} onChange={(e) => setFecha(e.currentTarget.value)} />
           <select value={prio} onChange={(e) => setPrio(e.currentTarget.value)}>
             {Object.entries(PRIOS).map(([k, v]) => <option key={k} value={k}>{v.txt}</option>)}
           </select>
-          <button onClick={guardarFecha} disabled={busy}>Guardar</button>
+          <button onClick={() => correr(() => supabase.rpc("wf_set_due", { p_epm: app.epm, p_commitment_date: fecha || null, p_priority: prio }))} disabled={busy}>Guardar</button>
         </div>
-        <p className="hint">La fecha de compromiso es del equipo — distinta del SLA del escáner.
-          {app.compromiso_vencido && <b className="i-red"> · compromiso VENCIDO</b>}</p>
+        <p className="hint">Del equipo — distinta del SLA del escáner.{app.compromiso_vencido && <b className="i-red"> · VENCIDO</b>}</p>
       </div>
-
-      <div className="drawer-sec">
+      <div className="action-card">
         <label>Observadores ({watchers.length})</label>
         <ul className="wf-obs">
           {watchers.map((w) => (
             <li key={w.watcher_type + w.watcher_id}>
               <span className={`akind akind-${w.watcher_type === "grupo" ? "amber" : "blue"}`}>{w.watcher_type}</span>
               <span className="grow">{w.watcher_id}</span>
-              <button className="ghost btn-i" onClick={() => quitarObs(w)} disabled={busy}><X size={13} /></button>
+              <button className="ghost btn-i" onClick={() => correr(() => supabase.rpc("wf_watch", { p_epm: app.epm, p_watcher_id: w.watcher_id, p_watcher_type: w.watcher_type, p_remove: true }))} disabled={busy}><X size={13} /></button>
             </li>
           ))}
-          {!watchers.length && <li className="empty">Sin observadores. La torre se agrega sola al bloquear.</li>}
+          {!watchers.length && <li className="empty">La torre se agrega sola al bloquear.</li>}
         </ul>
         <div className="row-inline">
           <input value={nuevoObs} onChange={(e) => setNuevoObs(e.currentTarget.value)} placeholder="correo del observador" />
-          <button className="ghost" onClick={agregarObs} disabled={busy || !nuevoObs}>Agregar</button>
+          <button className="ghost" onClick={() => { if (nuevoObs) correr(() => supabase.rpc("wf_watch", { p_epm: app.epm, p_watcher_id: nuevoObs, p_watcher_type: "persona" }).then((r) => { setNuevoObs(""); return r; })); }} disabled={busy || !nuevoObs}>Agregar</button>
         </div>
       </div>
-
-      <div className="drawer-sec">
-        <label>Comentario</label>
-        <div className="row-inline">
-          <input value={comentario} onChange={(e) => setComentario(e.currentTarget.value)}
-            placeholder="Nota (se adjunta al cambio de estado o va sola)" />
-          <button className="ghost" onClick={comentar} disabled={busy || !comentario}>Comentar</button>
-        </div>
-      </div>
-
       {err && <p className="error"><AlertTriangle size={14} /> {err}</p>}
+      {bloqueando}
+    </div>
+  );
+}
 
-      <div className="drawer-sec">
-        <label>Historial</label>
-        <ul className="wf-log">
-          {log.map((e) => (
-            <li key={e.id}>
-              <span className="wf-log-when">{e.at.slice(0, 16).replace("T", " ")}</span>
-              <span className="wf-log-what">
-                {e.action === "assign" && <>asignó a <b>{e.a ?? "—"}</b></>}
-                {e.action === "state" && <>{WF[e.de ?? ""]?.txt ?? e.de ?? "—"} → <b>{WF[e.a ?? ""]?.txt ?? e.a}</b></>}
-                {e.action === "comment" && <>💬 {e.comment}</>}
-                {e.action === "due" && <>fecha compromiso → <b>{e.a ?? "—"}</b>{e.comment ? ` · ${e.comment}` : ""}</>}
-                {e.action === "watch" && <>👁 {e.comment ?? "observador"} {e.a ?? e.de}</>}
-                {e.action === "state" && e.comment && <span className="wf-log-c"> · {e.comment}</span>}
-              </span>
-              <span className="wf-log-who">{e.by_user}</span>
-            </li>
+// Timeline vertical agrupado por día.
+function Timeline({ log }: { log: WfEvent[] }) {
+  if (!log.length) return <div className="empty">Sin movimientos.</div>;
+  const grupos: Record<string, WfEvent[]> = {};
+  for (const e of log) { const d = e.at.slice(0, 10); (grupos[d] ??= []).push(e); }
+  const hoy = new Date().toISOString().slice(0, 10);
+  return (
+    <div className="timeline">
+      {Object.entries(grupos).map(([dia, evs]) => (
+        <div key={dia} className="tl-day">
+          <div className="tl-day-h">{dia === hoy ? "Hoy" : dia}</div>
+          {evs.map((e) => (
+            <div key={e.id} className="tl-entry">
+              <span className={`tl-node tl-${e.action === "state" ? (WF[e.a ?? ""]?.cls ?? "b") : e.action === "comment" ? "b" : e.action === "due" ? "a" : "g"}`} />
+              <div className="tl-body">
+                <div className="tl-line"><b>{e.by_user}</b> <span className="tl-when">{e.at.slice(11, 16)}</span></div>
+                <div className="tl-what">
+                  {e.action === "assign" && <>asignó a <b>{e.a ?? "—"}</b></>}
+                  {e.action === "state" && <>{WF[e.de ?? ""]?.txt ?? e.de ?? "—"} → <b>{WF[e.a ?? ""]?.txt ?? e.a}</b></>}
+                  {e.action === "comment" && <>comentó</>}
+                  {e.action === "due" && <>fijó compromiso → <b>{e.a}</b></>}
+                  {e.action === "watch" && <>👁 {e.comment ?? "observador"} {e.a ?? e.de}</>}
+                </div>
+                {e.comment && e.action !== "watch" && <div className="tl-quote">“{e.comment}”</div>}
+              </div>
+            </div>
           ))}
-          {!log.length && <li className="empty">Sin movimientos.</li>}
-        </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Pestaña Vulnerabilidades: los hallazgos de esta app, con triage por fila.
+function VulnsTab({ vulns, onChange }: { vulns: VFinding[]; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const abiertas = vulns.filter((v) => v.status !== "fixed" && v.status !== "not_observed");
+  async function fp(v: VFinding) {
+    setBusy(true);
+    await supabase.rpc("fnd_false_positive", { p_finding_key: v.finding_key, p_reason: "marcado desde la app", p_undo: v.es_falso_positivo });
+    setBusy(false); onChange();
+  }
+  async function aceptar(v: VFinding) {
+    const aprob = prompt("¿Quién aprueba la aceptación de riesgo?"); if (!aprob) return;
+    const just = prompt("Justificación / controles compensatorios:"); if (!just) return;
+    const venc = prompt("Fecha de expiración (YYYY-MM-DD):"); if (!venc) return;
+    setBusy(true);
+    const { error } = await supabase.rpc("fnd_accept_risk", { p_finding_key: v.finding_key, p_aprobado_por: aprob, p_justificacion: just, p_fecha_expiracion: venc });
+    setBusy(false); if (error) alert(error.message); else onChange();
+  }
+  return (
+    <div className="panel">
+      <h3>{abiertas.length} hallazgos abiertos <span className="hint">— la verdad del escáner, ningún estado humano los cierra</span></h3>
+      <div className="tbl-wrap">
+        <table className="tbl">
+          <thead><tr><th>Sev</th><th className="num">VPR</th><th>Título</th><th>Activo</th><th>KRI</th><th className="num">SLA</th><th>Disposición</th><th></th></tr></thead>
+          <tbody>
+            {abiertas.map((v) => {
+              const sla = v.sla_days != null ? v.edad_dias - v.sla_days : null;
+              return (
+                <tr key={v.finding_key} className={v.es_falso_positivo || v.es_riesgo_aceptado ? "row-muted" : ""}>
+                  <td><span className={sevClass(v.severity_scanner)}>{v.severity_scanner ?? "—"}</span></td>
+                  <td className="num">{v.vpr ?? "—"}</td>
+                  <td className="clip">{v.title}</td>
+                  <td className="mono clip">{v.asset}</td>
+                  <td>{v.kri_status ?? "—"}</td>
+                  <td className={`num ${v.vencido_real ? "warn" : ""}`}>{sla != null ? (sla > 0 ? `-${sla}d` : `${-sla}d`) : "—"}</td>
+                  <td>
+                    {v.es_falso_positivo ? <span className="badge badge-neutral">falso positivo</span> : null}
+                    {v.es_riesgo_aceptado ? <span className="badge badge-reg" title={`Vence ${v.acepta_vence ?? ""}`}>riesgo aceptado</span> : null}
+                  </td>
+                  <td className="row-acts">
+                    <button className="ghost btn-i" disabled={busy} onClick={() => fp(v)}>{v.es_falso_positivo ? "quitar FP" : "falso pos."}</button>
+                    {!v.es_riesgo_aceptado && <button className="ghost btn-i" disabled={busy} onClick={() => aceptar(v)}>aceptar riesgo</button>}
+                  </td>
+                </tr>
+              );
+            })}
+            {!abiertas.length && <tr><td colSpan={8} className="empty">Sin hallazgos abiertos.</td></tr>}
+          </tbody>
+        </table>
       </div>
+    </div>
+  );
+}
+
+// Pestaña Contactos: cadena de escalamiento + observadores.
+function ContactosTab({ app, watchers }: { app: AppGestion; watchers: Watcher[] }) {
+  return (
+    <div className="panel">
+      <h3>Cadena de responsabilidad</h3>
+      <ul className="cadena">
+        <li><span className="cadena-rol">IT VP</span><b>{app.it_vp ?? "—"}</b></li>
+        <li className="cadena-in"><span className="cadena-rol">IT Manager</span><b>{app.it_manager ?? "—"}</b></li>
+        <li className="cadena-in2"><span className="cadena-rol">Contacto app</span><b>{app.contact_app ?? "—"}</b></li>
+      </ul>
+      <h3 className="mt2">Torre / escalamiento</h3>
+      <p className="hint">Cuando el estado es "Torre no atiende", la torre entra como observador automáticamente.</p>
+      <ul className="wf-obs">
+        {watchers.map((w) => <li key={w.watcher_type + w.watcher_id}><span className={`akind akind-${w.watcher_type === "grupo" ? "amber" : "blue"}`}>{w.watcher_type}</span><span className="grow">{w.watcher_id}</span></li>)}
+        {!watchers.length && <li className="empty">Sin observadores.</li>}
+      </ul>
     </div>
   );
 }
