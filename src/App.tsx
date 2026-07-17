@@ -546,13 +546,26 @@ function Actividad() {
   );
 }
 
+// Barra de riesgo 0-100 con color por tramo (T0>66 rojo, medio ámbar, bajo gris).
+function Risk({ score }: { score: number }) {
+  const tono = score >= 66 ? "r" : score >= 33 ? "a" : "g";
+  return (
+    <span className="risk" title={`Risk score ${score}/100`}>
+      <span className="risk-n">{score}</span>
+      <span className="risk-bar"><span className={`risk-fill risk-${tono}`} style={{ width: `${Math.max(score, 4)}%` }} /></span>
+    </span>
+  );
+}
+
 // ---------- Gestión (la cola de remediación por app) ----------
 type AppGestion = {
   epm: string; app_name: string | null; tier: string | null; usage: string | null;
-  exposed_internet: boolean | null; it_vp: string | null; it_manager: string | null;
+  exposed_internet: boolean | null; mx_regulatory: boolean | null;
+  it_vp: string | null; it_manager: string | null;
   contact_app: string | null; workflow_state: string; assignee: string | null;
   blocked_reason: string | null; updated_by: string | null; updated_at: string | null;
   abiertos: number; criticos: number; fuera_sla: number; vencidos: number;
+  vencidos_altos: number; app_crit: number; risk_score: number;
 };
 type WfEvent = { id: number; at: string; action: string; by_user: string; de: string | null; a: string | null; comment: string | null };
 
@@ -574,7 +587,7 @@ function Gestion() {
 
   async function load() {
     const { data } = await supabase.from("v_app_gestion").select("*")
-      .order("criticos", { ascending: false }).order("abiertos", { ascending: false });
+      .order("risk_score", { ascending: false }).order("vencidos", { ascending: false });
     setRows((data ?? []) as AppGestion[]);
   }
   useEffect(() => { load(); }, []);
@@ -613,22 +626,25 @@ function Gestion() {
         <p className="hint">El riesgo (críticos, vencidos) lo dice el escáner. El estado es el seguimiento del equipo — no cambia el número.</p>
         <div className="tbl-wrap">
           <table className="tbl">
-            <thead><tr><th>App</th><th>IT VP</th><th>Estado</th><th>Asignado</th>
-              <th>Crít</th><th>Venc.</th><th>Abiertos</th><th></th></tr></thead>
+            <thead><tr><th className="num">Risk</th><th>App</th><th>IT VP</th><th>Estado</th><th>Asignado</th>
+              <th className="num">Crít</th><th className="num">Venc.</th><th className="num">Abiertos</th><th></th></tr></thead>
             <tbody>
               {vista.map((r) => (
                 <tr key={r.epm} className={sel?.epm === r.epm ? "sel" : ""}>
-                  <td className="clip">{r.app_name ?? r.epm}{r.exposed_internet ? <span className="tag-exp" title="Expuesta a internet"> ⬈ internet</span> : ""}</td>
+                  <td className="num"><Risk score={r.risk_score} /></td>
+                  <td className="clip">{r.app_name ?? r.epm}
+                    {r.exposed_internet ? <span className="badge badge-exp" title="Expuesta a internet">internet</span> : null}
+                    {r.mx_regulatory ? <span className="badge badge-reg" title="App regulatoria (CNBV)">reg</span> : null}</td>
                   <td className="clip">{r.it_vp ?? "—"}</td>
                   <td><span className={`akind akind-${WF[r.workflow_state]?.cls ?? "gris"}`}>{WF[r.workflow_state]?.txt ?? r.workflow_state}</span></td>
                   <td>{r.assignee ?? "—"}</td>
-                  <td className={r.criticos ? "hot" : ""}>{r.criticos}</td>
-                  <td className={r.vencidos ? "warn" : ""}>{r.vencidos}</td>
-                  <td>{r.abiertos}</td>
+                  <td className={`num ${r.criticos ? "hot" : ""}`}>{r.criticos}</td>
+                  <td className={`num ${r.vencidos ? "warn" : ""}`}>{r.vencidos}</td>
+                  <td className="num">{r.abiertos}</td>
                   <td><button className="ghost btn-i" onClick={() => setSel(r)}>Gestionar</button></td>
                 </tr>
               ))}
-              {!vista.length && <tr><td colSpan={8} className="empty">Sin apps. Carga un escaneo.</td></tr>}
+              {!vista.length && <tr><td colSpan={9} className="empty">Sin apps. Carga un escaneo.</td></tr>}
             </tbody>
           </table>
         </div>

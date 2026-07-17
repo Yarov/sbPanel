@@ -833,35 +833,85 @@ end $$;
 -- ==========================================================================
 
 -- La cola de trabajo: una fila por app, con su riesgo REAL y su estado humano.
-create or replace view v_app_gestion as
-  select a.epm, a.app_name, a.tier, a.usage, a.exposed_internet,
+-- Criticidad de la app (1-5): el "ACR" del patrón AES de Tenable, adaptado al APM.
+-- El core-tier pesa MÁS que la exposición (en banca, tier-0/1 core > una app basura
+-- expuesta). mx_regulatory (CNBV) suma por peso de auditoría, acotado dentro del 1-5.
+create or replace function silver.app_criticality(
+  p_tier text, p_usage text, p_exposed boolean, p_regulatory boolean default false
+) returns int language sql immutable as $$
+  select least(5, greatest(1,
+      1
+    + (case when p_tier in ('0','1') then 2       -- core/crítica = +2
+            when p_tier = '2'        then 1
+            else 0 end)
+    + (case when p_usage = 'Prod'    then 1 else 0 end)
+    + (case when p_exposed           then 1 else 0 end)   -- exposición +1 (modificador, no eje)
+    + (case when p_regulatory        then 1 else 0 end)));
+$$;
+
+-- Peso de un hallazgo: el VPR de Tenable si viene (ya está en los datos, no lo
+-- recalculamos), si no un fallback por severidad. Es el "QDS/VPR" del score.
+create or replace function silver.finding_weight(
+  p_vpr numeric, p_sev text
+) returns numeric language sql immutable as $$
+  select coalesce(p_vpr, case lower(p_sev)
+    when 'critical' then 9 when 'high' then 7
+    when 'medium' then 4 when 'low' then 1 else 2 end);
+$$;
+
+-- ==========================================================================
+-- v_app_gestion — la cola, con RISK SCORE (0-100). Fórmula top-weighted:
+--   score = app_crit × MAX(peso) × volumen_acotado × castigo_SLA
+-- · MAX(peso), no avg: el PEOR hallazgo pone el piso. Cerrar un low nunca sube
+--   el score (avg lo hacía no-monotónico); una crítica siempre domina.
+-- · volumen acotado least(1.6, count^0.15): más backlog pesa un poco más, pero
+--   con techo, así 2,000 lows no le ganan a 3 críticas.
+-- · castigo SLA (×1 a ×1.8): un vencido crítico/high dispara +50%; +30% según la
+--   fracción vencida. En banca el breach de SLA es el evento auditable #1.
+-- ==========================================================================
+drop view if exists v_discrepancia;
+drop view if exists v_app_gestion;
+create view v_app_gestion as
+  with abiertas as (
+    select f.epm, silver.finding_weight(f.vpr, f.severity_scanner) as peso,
+           lower(f.severity_scanner) as sev, f.kri_status,
+           (coalesce(f.kri_status,'') = 'NOT_REMEDIATED_IN_SLA'
+            or (f.sla_days is not null
+                and greatest(current_date - f.first_observed::date,0) > f.sla_days)) as vencido
+    from silver.findings f
+    where f.status not in ('fixed','not_observed')
+  )
+  select a.epm, a.app_name, a.tier, a.usage, a.exposed_internet, a.mx_regulatory,
          a.it_vp, a.it_manager, a.contact_app,
          coalesce(w.workflow_state, 'sin_asignar') as workflow_state,
          w.assignee, w.blocked_reason, w.updated_by, w.updated_at,
-         count(f.finding_key) filter (where f.status not in ('fixed','not_observed')) as abiertos,
-         count(f.finding_key) filter (where lower(f.severity_scanner)='critical'
-                                        and f.status not in ('fixed','not_observed')) as criticos,
-         count(f.finding_key) filter (where f.status not in ('fixed','not_observed')
-                                        and f.kri_status is not null
-                                        and f.kri_status <> 'IN_TIME') as fuera_sla,
-         count(f.finding_key) filter (where f.status not in ('fixed','not_observed')
-                                        and f.sla_days is not null
-                                        and greatest(current_date - f.first_observed::date,0) > f.sla_days) as vencidos
+         count(ab.*)                                      as abiertos,
+         count(ab.*) filter (where ab.sev = 'critical')   as criticos,
+         count(ab.*) filter (where ab.kri_status is not null and ab.kri_status <> 'IN_TIME') as fuera_sla,
+         count(ab.*) filter (where ab.vencido)            as vencidos,
+         count(ab.*) filter (where ab.vencido and ab.sev in ('critical','high')) as vencidos_altos,
+         silver.app_criticality(a.tier, a.usage, a.exposed_internet, a.mx_regulatory) as app_crit,
+         round(least(100,
+             silver.app_criticality(a.tier, a.usage, a.exposed_internet, a.mx_regulatory)
+           * coalesce(max(ab.peso), 0)
+           * least(1.6, power(greatest(count(ab.*), 1), 0.15))
+           * ( 1
+               + 0.5 * (count(ab.*) filter (where ab.vencido and ab.sev in ('critical','high')) > 0)::int
+               + 0.3 * (count(ab.*) filter (where ab.vencido))::numeric / greatest(count(ab.*), 1) )
+         ))::int as risk_score
   from silver.applications a
   left join silver.app_workflow w using (epm)
-  left join silver.findings f using (epm)
-  group by a.epm, a.app_name, a.tier, a.usage, a.exposed_internet,
+  left join abiertas ab on ab.epm = a.epm
+  group by a.epm, a.app_name, a.tier, a.usage, a.exposed_internet, a.mx_regulatory,
            a.it_vp, a.it_manager, a.contact_app,
            w.workflow_state, w.assignee, w.blocked_reason, w.updated_by, w.updated_at;
 
 -- La "discrepancia": apps marcadas atendido/en_atención que el escáner SIGUE
--- viendo con críticos abiertos. Con "el escáner manda" no es una alerta que
--- salta, pero sí una fila que se puede mirar: el trabajo dice una cosa y Tenable
--- otra. Es la que más vale la pena revisar.
-create or replace view v_discrepancia as
+-- viendo con críticos abiertos. El trabajo dice una cosa y Tenable otra.
+create view v_discrepancia as
   select * from v_app_gestion
   where workflow_state in ('atendido','en_atencion') and criticos > 0
-  order by criticos desc;
+  order by risk_score desc;
 
 -- La bitácora de gestión, legible.
 create or replace view v_workflow_log as

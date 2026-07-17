@@ -609,3 +609,17 @@ svg { flex-shrink: 0; }
 .wf-log-when { color: var(--muted); font-family: ui-monospace, monospace; font-size: .78rem; }
 .wf-log-who { color: var(--muted); font-size: .76rem; }
 .wf-log-c { color: var(--muted); }
+
+/* ---------- risk score + badges (fase 1) ---------- */
+.tbl th.num, .tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.risk { display: inline-flex; align-items: center; gap: .45rem; justify-content: flex-end; }
+.risk-n { font-weight: 700; font-variant-numeric: tabular-nums; min-width: 1.6em; text-align: right; }
+.risk-bar { width: 46px; height: 6px; background: rgba(255,255,255,.08); border-radius: 3px; overflow: hidden; }
+.risk-fill { display: block; height: 100%; border-radius: 3px; }
+.risk-r { background: #ec111a; }
+.risk-a { background: #fbbf24; }
+.risk-g { background: #6b7280; }
+.badge { font-size: .64rem; text-transform: uppercase; letter-spacing: .03em; padding: .05rem .3rem;
+  border-radius: 4px; margin-left: .35rem; vertical-align: middle; }
+.badge-exp { background: rgba(236,17,26,.14); color: #fca5a5; }
+.badge-reg { background: rgba(96,165,250,.14); color: #93c5fd; }
