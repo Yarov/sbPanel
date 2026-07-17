@@ -97,6 +97,7 @@ create table if not exists silver.findings (
   plugin_id    text,
   port         text,
   protocol     text,
+  managed_by   text,                                  -- la torre de infra que administra el host
 
   -- plano 1: hechos del escáner
   severity_scanner text,
@@ -120,6 +121,9 @@ create table if not exists silver.findings (
   last_load_id uuid,
   updated_at   timestamptz default now()
 );
+-- create table if not exists NO agrega columnas si la tabla ya existía: para
+-- bases previas hay que alterar explícito (managed_by = la torre de infra).
+alter table silver.findings add column if not exists managed_by text;
 create index if not exists f_epm on silver.findings(epm);
 create index if not exists f_durable on silver.findings(durable_key);
 create index if not exists f_load on silver.findings(source, last_load_id);
@@ -222,11 +226,11 @@ begin
 
       if not found then
         insert into silver.findings(finding_key, durable_key, source, epm, asset, title, cve,
-          plugin_id, port, protocol, severity_scanner, cvss, vpr, state_scanner, status,
+          plugin_id, port, protocol, managed_by, severity_scanner, cvss, vpr, state_scanner, status,
           first_observed, last_seen, last_fixed, resurfaced_date, age_in_days,
           severity_scotia, recast_reason, kri_status, sla_days, remaining_days, last_load_id)
         values (v_key, v_dur, r->>'source', v_epm, r->>'asset', coalesce(r->>'title','(sin título)'),
-          r->>'cve', r->>'plugin_id', r->>'port', r->>'protocol',
+          r->>'cve', r->>'plugin_id', r->>'port', r->>'protocol', r->>'managed_by',
           r->>'severity_scanner', (r->>'cvss')::numeric, (r->>'vpr')::numeric,
           r->>'state_scanner', v_st, v_first, coalesce(v_seen, now()),
           nullif(r->>'last_fixed','')::timestamptz, nullif(r->>'resurfaced_date','')::timestamptz,
@@ -291,6 +295,7 @@ begin
           last_fixed=nullif(r->>'last_fixed','')::timestamptz,
           resurfaced_date=nullif(r->>'resurfaced_date','')::timestamptz,
           age_in_days=(r->>'age_in_days')::numeric::int,
+          managed_by=r->>'managed_by',
           severity_scotia=r->>'severity_scotia', recast_reason=r->>'recast_reason',
           kri_status=r->>'kri_status', sla_days=(r->>'sla_days')::numeric::int,
           remaining_days=(r->>'remaining_days')::numeric::int,
@@ -429,6 +434,26 @@ begin
   select p.finding_key, p_load_id, p.epm, 'not_observed', p.status, 'ausente del archivo'
   from previos p;
   get diagnostics v_cerrados = row_count;
+
+  -- Auto-asignación (patrón ClickUp "when task created, assign to X"): las apps
+  -- nuevas con hallazgos se auto-asignan a su IT Manager. Aquí tenemos ventaja
+  -- sobre ClickUp — el IT Manager es dato de la app, así que es un JOIN, no un
+  -- workaround. Si la app no tiene IT Manager, queda 'sin_asignar' (bandeja de triaje).
+  with nuevas as (
+    insert into silver.app_workflow(epm, workflow_state, assignee, updated_by)
+    select a.epm,
+           case when nullif(a.it_manager,'') is not null then 'asignado' else 'sin_asignar' end,
+           nullif(a.it_manager,''), 'auto: ingesta'
+    from silver.applications a
+    where a.epm in (select epm from silver.findings where source=v_load.source and epm is not null)
+      and not exists (select 1 from silver.app_workflow w where w.epm=a.epm)
+    returning epm, assignee
+  )
+  insert into silver.app_workflow_events(epm, action, by_user, a, comment)
+  select epm, 'assign', 'auto: ingesta', assignee,
+         case when assignee is null then 'sin IT Manager en el catálogo — triaje manual'
+              else 'auto-asignado al IT Manager de la app' end
+  from nuevas;
 
   update bronze.loads set state='complete', finished_at=now(),
     rows_closed=v_cerrados, epms_seen=v_epms
@@ -731,11 +756,28 @@ create table if not exists silver.app_workflow (
     -- sin_asignar | asignado | en_atencion | bloqueado_torre | atendido
   assignee       text,             -- a quién se le asignó la remediación
   blocked_reason text,             -- por qué está bloqueado (torre no atiende, etc.)
+  commitment_date date,            -- reloj HUMANO: fecha de compromiso (≠ SLA del escáner)
+  priority       text,             -- urgent|high|normal|low (banderas estilo ClickUp)
   updated_by     text,             -- correo de quien hizo el último cambio
   updated_at     timestamptz default now()
 );
+-- por si la tabla ya existía sin estas columnas (bases previas a fase 2)
+alter table silver.app_workflow add column if not exists commitment_date date;
+alter table silver.app_workflow add column if not exists priority text;
 create index if not exists awf_state on silver.app_workflow(workflow_state);
 create index if not exists awf_assignee on silver.app_workflow(assignee);
+
+-- Observadores (patrón followers de ClickUp): gente/grupos suscritos a la app sin
+-- ser el responsable. La torre de infra observa las apps bloqueadas por ella.
+create table if not exists silver.task_watchers (
+  epm          text not null references silver.applications(epm) on delete cascade,
+  watcher_type text not null default 'grupo',   -- persona | grupo
+  watcher_id   text not null,                   -- correo o nombre del grupo (ej: la torre)
+  added_by     text,
+  added_at     timestamptz default now(),
+  primary key (epm, watcher_type, watcher_id)
+);
+create index if not exists tw_epm on silver.task_watchers(epm);
 
 -- Bitácora del trabajo humano. Append-only: cada asignación, cambio de estado
 -- y comentario. Es el rastro de auditoría de la gestión.
@@ -810,6 +852,23 @@ begin
 
   insert into silver.app_workflow_events(epm, action, by_user, de, a, comment)
   values (p_epm, 'state', v_who, v_prev, p_state, nullif(p_comment,''));
+
+  -- Al bloquear por torre: agregar automáticamente la torre de infra (managed_by
+  -- del hallazgo dominante) como OBSERVADOR, para que se entere y escale sin ser
+  -- el responsable. Es el patrón ClickUp "notify followers on status change".
+  if p_state = 'bloqueado_torre' then
+    insert into silver.task_watchers(epm, watcher_type, watcher_id, added_by)
+    select p_epm, 'grupo', mb, 'auto: bloqueo'
+    from (select managed_by mb from silver.findings
+          where epm=p_epm and nullif(managed_by,'') is not null
+          group by managed_by order by count(*) desc limit 1) t
+    on conflict (epm, watcher_type, watcher_id) do nothing;
+    insert into silver.app_workflow_events(epm, action, by_user, a, comment)
+    select p_epm, 'watch', 'auto: bloqueo', mb, 'torre agregada como observador por el bloqueo'
+    from (select managed_by mb from silver.findings
+          where epm=p_epm and nullif(managed_by,'') is not null
+          group by managed_by order by count(*) desc limit 1) t;
+  end if;
   return jsonb_build_object('epm', p_epm, 'de', v_prev, 'a', p_state);
 end $$;
 
@@ -885,6 +944,10 @@ create view v_app_gestion as
          a.it_vp, a.it_manager, a.contact_app,
          coalesce(w.workflow_state, 'sin_asignar') as workflow_state,
          w.assignee, w.blocked_reason, w.updated_by, w.updated_at,
+         w.commitment_date, w.priority,
+         (w.commitment_date is not null and w.commitment_date < current_date
+          and coalesce(w.workflow_state,'') <> 'atendido') as compromiso_vencido,
+         (select count(*) from silver.task_watchers t where t.epm = a.epm) as watchers,
          count(ab.*)                                      as abiertos,
          count(ab.*) filter (where ab.sev = 'critical')   as criticos,
          count(ab.*) filter (where ab.kri_status is not null and ab.kri_status <> 'IN_TIME') as fuera_sla,
@@ -904,7 +967,13 @@ create view v_app_gestion as
   left join abiertas ab on ab.epm = a.epm
   group by a.epm, a.app_name, a.tier, a.usage, a.exposed_internet, a.mx_regulatory,
            a.it_vp, a.it_manager, a.contact_app,
-           w.workflow_state, w.assignee, w.blocked_reason, w.updated_by, w.updated_at;
+           w.workflow_state, w.assignee, w.blocked_reason, w.updated_by, w.updated_at,
+           w.commitment_date, w.priority;
+
+-- Observadores por app, legible.
+create or replace view v_app_watchers as
+  select t.epm, a.app_name, t.watcher_type, t.watcher_id, t.added_by, t.added_at
+  from silver.task_watchers t left join silver.applications a using (epm);
 
 -- La "discrepancia": apps marcadas atendido/en_atención que el escáner SIGUE
 -- viendo con críticos abiertos. El trabajo dice una cosa y Tenable otra.
@@ -947,4 +1016,67 @@ revoke all on silver.app_workflow, silver.app_workflow_events from anon;
 -- Realtime: el workflow sí interesa en vivo (dos analistas trabajando la cola).
 do $$ begin
   alter publication supabase_realtime add table silver.app_workflow;
+exception when duplicate_object then null; when undefined_object then null; end $$;
+
+-- ==========================================================================
+-- FASE 2 — Ergonomías de ClickUp: dos relojes, observadores, auto-asignación.
+-- (la tabla task_watchers y las columnas de app_workflow se crean arriba, antes
+--  de v_app_gestion que las referencia; aquí van solo las RPCs.)
+-- ==========================================================================
+
+-- ---------- wf_set_due: fecha de compromiso + prioridad ----------
+create or replace function wf_set_due(
+  p_epm text, p_commitment_date date, p_priority text default null
+) returns jsonb language plpgsql security invoker as $$
+declare v_who text := coalesce(auth.email(),'desconocido'); v_prev date;
+begin
+  if p_priority is not null and p_priority not in ('urgent','high','normal','low') then
+    raise exception 'Prioridad inválida: %', p_priority using errcode='22023';
+  end if;
+  select commitment_date into v_prev from silver.app_workflow where epm=p_epm;
+  insert into silver.app_workflow(epm, commitment_date, priority, updated_by)
+  values (p_epm, p_commitment_date, p_priority, v_who)
+  on conflict (epm) do update set
+    commitment_date = p_commitment_date,
+    priority = coalesce(p_priority, silver.app_workflow.priority),
+    updated_by = v_who, updated_at = now();
+  insert into silver.app_workflow_events(epm, action, by_user, de, a, comment)
+  values (p_epm, 'due', v_who, v_prev::text, p_commitment_date::text,
+          case when p_priority is not null then 'prioridad: '||p_priority else null end);
+  return jsonb_build_object('epm',p_epm,'commitment_date',p_commitment_date);
+end $$;
+
+-- ---------- wf_watch: agregar/quitar observador ----------
+create or replace function wf_watch(
+  p_epm text, p_watcher_id text, p_watcher_type text default 'persona', p_remove boolean default false
+) returns jsonb language plpgsql security invoker as $$
+declare v_who text := coalesce(auth.email(),'desconocido');
+begin
+  if p_remove then
+    delete from silver.task_watchers where epm=p_epm and watcher_id=p_watcher_id and watcher_type=p_watcher_type;
+    insert into silver.app_workflow_events(epm, action, by_user, de, comment)
+    values (p_epm, 'watch', v_who, p_watcher_id, 'dejó de observar');
+  else
+    insert into silver.task_watchers(epm, watcher_type, watcher_id, added_by)
+    values (p_epm, p_watcher_type, p_watcher_id, v_who) on conflict do nothing;
+    insert into silver.app_workflow_events(epm, action, by_user, a, comment)
+    values (p_epm, 'watch', v_who, p_watcher_id, 'agregó observador');
+  end if;
+  return jsonb_build_object('epm',p_epm,'watcher',p_watcher_id);
+end $$;
+
+-- ---------- permisos fase 2 (van después del revoke a public de arriba) ----------
+alter table silver.task_watchers enable row level security;
+drop policy if exists solo_con_sesion on silver.task_watchers;
+create policy solo_con_sesion on silver.task_watchers for all to authenticated using (true) with check (true);
+revoke all on silver.task_watchers from anon;
+grant all on silver.task_watchers to authenticated;
+grant select on v_app_watchers to authenticated;
+revoke select on v_app_watchers from anon;
+grant execute on function wf_set_due(text,date,text)         to authenticated;
+grant execute on function wf_watch(text,text,text,boolean)   to authenticated;
+revoke execute on all functions in schema public from public, anon;
+
+do $$ begin
+  alter publication supabase_realtime add table silver.task_watchers;
 exception when duplicate_object then null; when undefined_object then null; end $$;

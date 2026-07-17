@@ -566,7 +566,10 @@ type AppGestion = {
   blocked_reason: string | null; updated_by: string | null; updated_at: string | null;
   abiertos: number; criticos: number; fuera_sla: number; vencidos: number;
   vencidos_altos: number; app_crit: number; risk_score: number;
+  commitment_date: string | null; priority: string | null;
+  compromiso_vencido: boolean; watchers: number;
 };
+type Watcher = { epm: string; watcher_type: string; watcher_id: string; added_by: string | null; added_at: string };
 type WfEvent = { id: number; at: string; action: string; by_user: string; de: string | null; a: string | null; comment: string | null };
 
 // Los estados humanos, con etiqueta y color. "atendido" es un reclamo sin
@@ -579,6 +582,10 @@ const WF: Record<string, { txt: string; cls: string }> = {
   atendido: { txt: "Atendido (sin verificar)", cls: "green" },
 };
 const WF_ESTADOS = Object.keys(WF);
+const PRIOS: Record<string, { txt: string; cls: string }> = {
+  urgent: { txt: "Urgente", cls: "r" }, high: { txt: "Alta", cls: "a" },
+  normal: { txt: "Normal", cls: "b" }, low: { txt: "Baja", cls: "g" },
+};
 
 function Gestion() {
   const [rows, setRows] = useState<AppGestion[]>([]);
@@ -636,7 +643,12 @@ function Gestion() {
                     {r.exposed_internet ? <span className="badge badge-exp" title="Expuesta a internet">internet</span> : null}
                     {r.mx_regulatory ? <span className="badge badge-reg" title="App regulatoria (CNBV)">reg</span> : null}</td>
                   <td className="clip">{r.it_vp ?? "—"}</td>
-                  <td><span className={`akind akind-${WF[r.workflow_state]?.cls ?? "gris"}`}>{WF[r.workflow_state]?.txt ?? r.workflow_state}</span></td>
+                  <td>
+                    <span className={`akind akind-${WF[r.workflow_state]?.cls ?? "gris"}`}>{WF[r.workflow_state]?.txt ?? r.workflow_state}</span>
+                    {r.priority && r.priority !== "normal" ? <span className={`prio prio-${PRIOS[r.priority]?.cls}`} title={`Prioridad ${PRIOS[r.priority]?.txt}`}>⚑</span> : null}
+                    {r.watchers > 0 ? <span className="obs-count" title={`${r.watchers} observador(es)`}>👁 {r.watchers}</span> : null}
+                    {r.commitment_date ? <span className={`due ${r.compromiso_vencido ? "due-venc" : ""}`} title="Fecha de compromiso">{r.commitment_date.slice(5)}</span> : null}
+                  </td>
                   <td>{r.assignee ?? "—"}</td>
                   <td className={`num ${r.criticos ? "hot" : ""}`}>{r.criticos}</td>
                   <td className={`num ${r.vencidos ? "warn" : ""}`}>{r.vencidos}</td>
@@ -654,34 +666,49 @@ function Gestion() {
   );
 }
 
-// Panel de una app: cambiar estado, asignar, comentar, y su historial.
+// Panel de una app: cambiar estado, asignar, fechas, observadores, comentar, historial.
 function GestionApp({ app, onClose, onChange }: { app: AppGestion; onClose: () => void; onChange: () => void }) {
   const [log, setLog] = useState<WfEvent[]>([]);
+  const [watchers, setWatchers] = useState<Watcher[]>([]);
   const [asignado, setAsignado] = useState(app.assignee ?? "");
   const [comentario, setComentario] = useState("");
   const [motivo, setMotivo] = useState(app.blocked_reason ?? "");
+  const [fecha, setFecha] = useState(app.commitment_date ?? "");
+  const [prio, setPrio] = useState(app.priority ?? "normal");
+  const [nuevoObs, setNuevoObs] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  async function cargarLog() {
-    const { data } = await supabase.from("v_workflow_log").select("*")
-      .eq("epm", app.epm).order("at", { ascending: false }).limit(50);
-    setLog((data ?? []) as WfEvent[]);
+  async function recargar() {
+    const [l, w] = await Promise.all([
+      supabase.from("v_workflow_log").select("*").eq("epm", app.epm).order("at", { ascending: false }).limit(50),
+      supabase.from("v_app_watchers").select("*").eq("epm", app.epm),
+    ]);
+    setLog((l.data ?? []) as WfEvent[]); setWatchers((w.data ?? []) as Watcher[]);
   }
-  useEffect(() => { cargarLog(); setAsignado(app.assignee ?? ""); setMotivo(app.blocked_reason ?? ""); }, [app.epm]);
+  useEffect(() => {
+    recargar(); setAsignado(app.assignee ?? ""); setMotivo(app.blocked_reason ?? "");
+    setFecha(app.commitment_date ?? ""); setPrio(app.priority ?? "normal");
+  }, [app.epm]);
 
   async function correr(fn: () => PromiseLike<{ error: any }>) {
     setBusy(true); setErr("");
     const { error } = await fn();
     setBusy(false);
     if (error) { setErr(error.message); return false; }
-    await cargarLog(); onChange(); return true;
+    await recargar(); onChange(); return true;
   }
   const asignar = () => correr(() => supabase.rpc("wf_assign", { p_epm: app.epm, p_assignee: asignado }));
   const setEstado = (estado: string) => correr(() => supabase.rpc("wf_set_state",
     { p_epm: app.epm, p_state: estado, p_comment: comentario || null, p_blocked_reason: motivo || null }))
     .then((ok) => { if (ok) setComentario(""); });
   const comentar = async () => { if (await correr(() => supabase.rpc("wf_comment", { p_epm: app.epm, p_comment: comentario }))) setComentario(""); };
+  const guardarFecha = () => correr(() => supabase.rpc("wf_set_due",
+    { p_epm: app.epm, p_commitment_date: fecha || null, p_priority: prio }));
+  const agregarObs = async () => { if (await correr(() => supabase.rpc("wf_watch",
+    { p_epm: app.epm, p_watcher_id: nuevoObs, p_watcher_type: "persona" }))) setNuevoObs(""); };
+  const quitarObs = (w: Watcher) => correr(() => supabase.rpc("wf_watch",
+    { p_epm: app.epm, p_watcher_id: w.watcher_id, p_watcher_type: w.watcher_type, p_remove: true }));
 
   return (
     <div className="drawer">
@@ -719,10 +746,39 @@ function GestionApp({ app, onClose, onChange }: { app: AppGestion; onClose: () =
               onClick={() => setEstado(s)}>{WF[s].txt}</button>
           ))}
         </div>
-        {(app.workflow_state === "bloqueado_torre" || motivo) && (
-          <input className="mt" value={motivo} onChange={(e) => setMotivo(e.currentTarget.value)}
-            placeholder="Motivo del bloqueo (obligatorio para 'Torre no atiende')" />
-        )}
+        <input className="mt" value={motivo} onChange={(e) => setMotivo(e.currentTarget.value)}
+          placeholder="Motivo del bloqueo (obligatorio para 'Torre no atiende')" />
+      </div>
+
+      <div className="drawer-sec">
+        <label>Fecha de compromiso y prioridad</label>
+        <div className="row-inline">
+          <input type="date" value={fecha} onChange={(e) => setFecha(e.currentTarget.value)} />
+          <select value={prio} onChange={(e) => setPrio(e.currentTarget.value)}>
+            {Object.entries(PRIOS).map(([k, v]) => <option key={k} value={k}>{v.txt}</option>)}
+          </select>
+          <button onClick={guardarFecha} disabled={busy}>Guardar</button>
+        </div>
+        <p className="hint">La fecha de compromiso es del equipo — distinta del SLA del escáner.
+          {app.compromiso_vencido && <b className="i-red"> · compromiso VENCIDO</b>}</p>
+      </div>
+
+      <div className="drawer-sec">
+        <label>Observadores ({watchers.length})</label>
+        <ul className="wf-obs">
+          {watchers.map((w) => (
+            <li key={w.watcher_type + w.watcher_id}>
+              <span className={`akind akind-${w.watcher_type === "grupo" ? "amber" : "blue"}`}>{w.watcher_type}</span>
+              <span className="grow">{w.watcher_id}</span>
+              <button className="ghost btn-i" onClick={() => quitarObs(w)} disabled={busy}><X size={13} /></button>
+            </li>
+          ))}
+          {!watchers.length && <li className="empty">Sin observadores. La torre se agrega sola al bloquear.</li>}
+        </ul>
+        <div className="row-inline">
+          <input value={nuevoObs} onChange={(e) => setNuevoObs(e.currentTarget.value)} placeholder="correo del observador" />
+          <button className="ghost" onClick={agregarObs} disabled={busy || !nuevoObs}>Agregar</button>
+        </div>
       </div>
 
       <div className="drawer-sec">
@@ -746,6 +802,8 @@ function GestionApp({ app, onClose, onChange }: { app: AppGestion; onClose: () =
                 {e.action === "assign" && <>asignó a <b>{e.a ?? "—"}</b></>}
                 {e.action === "state" && <>{WF[e.de ?? ""]?.txt ?? e.de ?? "—"} → <b>{WF[e.a ?? ""]?.txt ?? e.a}</b></>}
                 {e.action === "comment" && <>💬 {e.comment}</>}
+                {e.action === "due" && <>fecha compromiso → <b>{e.a ?? "—"}</b>{e.comment ? ` · ${e.comment}` : ""}</>}
+                {e.action === "watch" && <>👁 {e.comment ?? "observador"} {e.a ?? e.de}</>}
                 {e.action === "state" && e.comment && <span className="wf-log-c"> · {e.comment}</span>}
               </span>
               <span className="wf-log-who">{e.by_user}</span>
