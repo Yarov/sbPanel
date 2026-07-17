@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, hasSupabase } from "./supabase";
 import { ingestFile, SOURCES, SourceId, IngestResult } from "./lib/ingest";
-import { Donut, StackH, Aging, KRI_COLORS } from "./Charts";
+import { Donut, StackH, Aging, Trend, TopBars, KRI_COLORS } from "./Charts";
 import {
   AlertOctagon, Layers, ShieldX, Scale,
   Loader2, Search, CheckCircle2, AlertTriangle, X, ChevronLeft, ChevronRight,
@@ -166,9 +166,11 @@ function Dashboard() {
   const [f, setF] = useState(EMPTY_F);
   const [org, setOrg] = useState<Org[]>([]);
   const [opts, setOpts] = useState<Record<string, string[]>>({});
+  const [ej, setEj] = useState<any>(null);
   const fRef = useRef(f); fRef.current = f;
 
   useEffect(() => {
+    supabase.rpc("metricas_ejecutivas", { p_source: "tenable" }).then((r) => setEj(r.data));
     supabase.from("v_org_tree").select("it_vp,it_manager,app_name,epm,abiertos").then((r) =>
       setOrg((r.data ?? []) as Org[]));
     supabase.from("v_filter_options").select("*").then((r) => {
@@ -267,6 +269,29 @@ function Dashboard() {
         <Kpi n={kpi.vps ?? 0} label="IT VP" />
         <Kpi n={kpi.apps ?? 0} label="Aplicaciones" />
       </div>
+
+      {ej && (
+        <div className="charts">
+          <div className="chart-card wide">
+            <h3>Nuevos vs remediados por carga <span className="h3-sub">¿ganamos o perdemos terreno?</span></h3>
+            {ej.nuevos_vs_atendidos?.length ? <Trend data={ej.nuevos_vs_atendidos} /> : <Empty />}
+          </div>
+          <div className="chart-card gauge-card">
+            <h3>Cumplimiento SLA</h3>
+            <div className="gauge">
+              <div className={`gauge-n ${(ej.sla_compliance ?? 100) < 80 ? "i-red" : "i-green"}`}>
+                {ej.sla_compliance != null ? `${ej.sla_compliance}%` : "—"}
+              </div>
+              <div className="gauge-l">abiertos dentro de plazo</div>
+              <div className="gauge-sub">MTTR: {ej.mttr_dias != null ? `${ej.mttr_dias} días` : "s/d"} · {ej.kpi?.cargas ?? 0} cargas</div>
+            </div>
+          </div>
+          <div className="chart-card">
+            <h3>Top apps que más incumplen SLA</h3>
+            {ej.top_incumplen?.length ? <TopBars data={ej.top_incumplen} color="#fbbf24" /> : <Empty />}
+          </div>
+        </div>
+      )}
 
       <div className="charts">
         <div className="chart-card">

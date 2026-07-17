@@ -1237,3 +1237,59 @@ grant execute on function fnd_accept_risk(text,text,text,date,text,text)  to aut
 grant execute on function fnd_revoke_acceptance(text)                     to authenticated;
 grant execute on function expirar_aceptaciones()                          to authenticated;
 revoke execute on all functions in schema public from public, anon;
+
+-- ==========================================================================
+-- FASE 4 — Métricas EJECUTIVAS (CISO/VP): tendencia, no foto.
+-- Sale de bronze.loads (cada carga con su fecha) + finding_events (new/fixed).
+-- Con una sola carga las series traen un punto; se llenan con cada carga mensual.
+-- ==========================================================================
+create or replace function metricas_ejecutivas(p_source text default 'tenable')
+returns jsonb language sql security invoker stable as $$
+  with abiertas as (
+    select * from silver.findings
+    where source=p_source and status not in ('fixed','not_observed') and not es_falso_positivo
+  )
+  select jsonb_build_object(
+    -- % de cumplimiento de SLA: abiertos dentro de plazo / total con SLA
+    'sla_compliance', (
+      select case when count(*) filter (where sla_days is not null) = 0 then null
+        else round(100.0 * count(*) filter (where sla_days is not null
+              and greatest(current_date - first_observed::date,0) <= sla_days)
+            / count(*) filter (where sla_days is not null)) end
+      from abiertas
+    ),
+    -- MTTR real (días): de evento 'new' a evento 'fixed' del mismo hallazgo
+    'mttr_dias', (
+      select round(avg(extract(epoch from (fx.at - nw.at))/86400))
+      from silver.finding_events fx
+      join silver.finding_events nw on nw.finding_key=fx.finding_key and nw.event='new'
+      where fx.event='fixed'
+    ),
+    -- Nuevos vs atendidos por carga (la película: ¿ganamos o perdemos terreno?)
+    'nuevos_vs_atendidos', (
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'label', to_char(l.data_date,'DD-Mon'),
+        'nuevos', (select count(*) from silver.finding_events e where e.load_id=l.load_id and e.event='new'),
+        'remediados', (select count(*) from silver.finding_events e where e.load_id=l.load_id and e.event='fixed'),
+        'no_observados', (select count(*) from silver.finding_events e where e.load_id=l.load_id and e.event='not_observed'),
+        'resurfaced', (select count(*) from silver.finding_events e where e.load_id=l.load_id and e.event='resurfaced')
+      ) order by l.data_date), '[]'::jsonb)
+      from bronze.loads l where l.source=p_source and l.state='complete'
+    ),
+    -- Top 5 apps que más incumplen SLA (la vista ejecutiva más potente con ~40 apps)
+    'top_incumplen', (
+      select coalesce(jsonb_agg(jsonb_build_object('label',label,'value',value) order by value desc),'[]'::jsonb)
+      from (select coalesce(nullif(app_name,''),'(sin app)') label, vencidos value
+            from v_app_gestion where vencidos > 0 order by vencidos desc limit 5) t
+    ),
+    'kpi', (select jsonb_build_object(
+        'abiertos', (select count(*) from abiertas),
+        'vencidos', (select count(*) from abiertas where sla_days is not null
+                     and greatest(current_date - first_observed::date,0) > sla_days),
+        'aceptados', (select count(*) from silver.findings where source=p_source and es_riesgo_aceptado),
+        'cargas', (select count(*) from bronze.loads where source=p_source and state='complete')
+      ))
+  );
+$$;
+grant execute on function metricas_ejecutivas(text) to authenticated;
+revoke execute on all functions in schema public from public, anon;

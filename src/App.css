@@ -692,3 +692,10 @@ svg { flex-shrink: 0; }
 .cadena-in { padding-left: 1.5rem; } .cadena-in2 { padding-left: 3rem; }
 .cadena-rol { font-size: .72rem; text-transform: uppercase; color: var(--muted); min-width: 90px; }
 .mt2 { margin-top: 1.4rem; }
+
+/* ---------- franja ejecutiva (fase 4) ---------- */
+.gauge-card { display: flex; flex-direction: column; }
+.gauge { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; padding: 1.5rem 0; }
+.gauge-n { font-size: 3rem; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; }
+.gauge-l { color: var(--muted); font-size: .82rem; margin-top: .4rem; }
+.gauge-sub { color: var(--muted); font-size: .76rem; margin-top: .8rem; }

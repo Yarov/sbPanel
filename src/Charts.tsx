@@ -1,6 +1,6 @@
 import {
   ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend,
-  BarChart, Bar, XAxis, YAxis, LabelList,
+  BarChart, Bar, XAxis, YAxis, LabelList, LineChart, Line, CartesianGrid,
 } from "recharts";
 
 const RED = "#ec111a";
@@ -103,6 +103,42 @@ export function Aging({ data, onSelect }: { data: Datum[] } & Sel) {
           onClick={(e: any) => onSelect?.(e?.label ?? e?.payload?.label)}>
           {data.map((_, i) => <Cell key={i} fill={tono[i] ?? RED} />)}
           <LabelList dataKey="value" position="top" fill="#9ca3af" fontSize={11} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// Nuevos vs remediados por carga: ¿el banco gana o pierde terreno?
+export type Serie = { label: string; nuevos: number; remediados: number; no_observados: number; resurfaced: number };
+export function Trend({ data }: { data: Serie[] }) {
+  return (
+    <ResponsiveContainer width="100%" height={200}>
+      <LineChart data={data} margin={{ left: 0, right: 12, top: 8, bottom: 4 }}>
+        <CartesianGrid stroke="#2b2b32" vertical={false} />
+        <XAxis dataKey="label" tick={{ fill: "#9ca3af", fontSize: 11 }} tickLine={false} axisLine={false} />
+        <YAxis tick={{ fill: "#9ca3af", fontSize: 11 }} tickLine={false} axisLine={false} width={28} />
+        <Tooltip contentStyle={tooltipStyle} />
+        <Legend wrapperStyle={{ fontSize: 11 }} iconSize={9} />
+        <Line type="monotone" dataKey="nuevos" name="Nuevos" stroke="#ec111a" strokeWidth={2} dot={{ r: 3 }} />
+        <Line type="monotone" dataKey="remediados" name="Remediados" stroke="#34d399" strokeWidth={2} dot={{ r: 3 }} />
+        <Line type="monotone" dataKey="no_observados" name="No observados" stroke="#6b7280" strokeWidth={2} strokeDasharray="4 3" dot={{ r: 2 }} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+// Barras horizontales simples (top offenders).
+export function TopBars({ data, color = "#ec111a" }: { data: Datum[]; color?: string }) {
+  const h = Math.max(120, data.length * 34 + 10);
+  return (
+    <ResponsiveContainer width="100%" height={h}>
+      <BarChart data={data} layout="vertical" margin={{ left: 6, right: 30, top: 4, bottom: 4 }}>
+        <XAxis type="number" hide />
+        <YAxis type="category" dataKey="label" width={150} tick={{ fill: "#9ca3af", fontSize: 11 }} tickLine={false} axisLine={false} />
+        <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
+        <Bar dataKey="value" fill={color} radius={[0, 5, 5, 0]} barSize={18}>
+          <LabelList dataKey="value" position="right" fill="#9ca3af" fontSize={11} />
         </Bar>
       </BarChart>
     </ResponsiveContainer>
