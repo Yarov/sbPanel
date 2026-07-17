@@ -716,3 +716,185 @@ revoke execute on all functions in schema public from public, anon;
 do $$ begin
   alter publication supabase_realtime add table bronze.loads;
 exception when duplicate_object then null; when undefined_object then null; end $$;
+
+-- ==========================================================================
+-- WORKFLOW por app (EPM) — la capa de SEGUIMIENTO.
+--
+-- Es el plano HUMANO: quién trabaja qué, por qué está bloqueado. Vive aparte
+-- de silver.findings (el plano del escáner) y NUNCA lo toca. La ingesta jamás
+-- escribe aquí; estas RPCs jamás tocan `status`. El escáner manda: el estado
+-- humano es la capa operativa, no cambia si un hallazgo cuenta como abierto.
+-- ==========================================================================
+create table if not exists silver.app_workflow (
+  epm            text primary key references silver.applications(epm) on delete cascade,
+  workflow_state text not null default 'sin_asignar',
+    -- sin_asignar | asignado | en_atencion | bloqueado_torre | atendido
+  assignee       text,             -- a quién se le asignó la remediación
+  blocked_reason text,             -- por qué está bloqueado (torre no atiende, etc.)
+  updated_by     text,             -- correo de quien hizo el último cambio
+  updated_at     timestamptz default now()
+);
+create index if not exists awf_state on silver.app_workflow(workflow_state);
+create index if not exists awf_assignee on silver.app_workflow(assignee);
+
+-- Bitácora del trabajo humano. Append-only: cada asignación, cambio de estado
+-- y comentario. Es el rastro de auditoría de la gestión.
+create table if not exists silver.app_workflow_events (
+  id       bigserial primary key,
+  epm      text not null,
+  action   text not null,          -- assign | state | comment
+  by_user  text not null,          -- correo de la sesión (auth.email())
+  at       timestamptz not null default now(),
+  de       text,
+  a        text,
+  comment  text
+);
+create index if not exists awfe_epm on silver.app_workflow_events(epm, at desc);
+
+-- Los estados válidos, en un solo lugar para que las RPCs validen contra esto.
+create or replace function silver.wf_estados() returns text[]
+  language sql immutable as $$ select array[
+    'sin_asignar','asignado','en_atencion','bloqueado_torre','atendido'] $$;
+
+-- ---------- wf_assign: asignar la remediación de una app ----------
+create or replace function wf_assign(p_epm text, p_assignee text)
+returns jsonb language plpgsql security invoker as $$
+declare v_prev text; v_who text := coalesce(auth.email(), 'desconocido');
+begin
+  if not exists (select 1 from silver.applications where epm = p_epm) then
+    raise exception 'EPM % no existe.', p_epm using errcode='23503';
+  end if;
+  select assignee into v_prev from silver.app_workflow where epm = p_epm;
+
+  insert into silver.app_workflow(epm, workflow_state, assignee, updated_by)
+  values (p_epm, 'asignado', nullif(p_assignee,''), v_who)
+  on conflict (epm) do update set
+    assignee = nullif(p_assignee,''),
+    -- asignar saca de 'sin_asignar', pero no pisa un estado de trabajo ya en curso
+    workflow_state = case when silver.app_workflow.workflow_state = 'sin_asignar'
+                          then 'asignado' else silver.app_workflow.workflow_state end,
+    updated_by = v_who, updated_at = now();
+
+  insert into silver.app_workflow_events(epm, action, by_user, de, a)
+  values (p_epm, 'assign', v_who, v_prev, nullif(p_assignee,''));
+  return jsonb_build_object('epm', p_epm, 'assignee', p_assignee);
+end $$;
+
+-- ---------- wf_set_state: cambiar el estado de remediación ----------
+create or replace function wf_set_state(
+  p_epm text, p_state text, p_comment text default null, p_blocked_reason text default null
+) returns jsonb language plpgsql security invoker as $$
+declare v_prev text; v_who text := coalesce(auth.email(), 'desconocido');
+begin
+  if not (p_state = any(silver.wf_estados())) then
+    raise exception 'Estado inválido: %. Válidos: %', p_state, silver.wf_estados()
+      using errcode='22023';
+  end if;
+  if not exists (select 1 from silver.applications where epm = p_epm) then
+    raise exception 'EPM % no existe.', p_epm using errcode='23503';
+  end if;
+  -- bloqueado_torre exige decir POR QUÉ: sin motivo no se puede escalar
+  if p_state = 'bloqueado_torre' and nullif(p_blocked_reason,'') is null then
+    raise exception 'bloqueado_torre requiere un motivo.' using errcode='22023';
+  end if;
+
+  select workflow_state into v_prev from silver.app_workflow where epm = p_epm;
+
+  insert into silver.app_workflow(epm, workflow_state, blocked_reason, updated_by)
+  values (p_epm, p_state,
+          case when p_state='bloqueado_torre' then p_blocked_reason else null end, v_who)
+  on conflict (epm) do update set
+    workflow_state = p_state,
+    blocked_reason = case when p_state='bloqueado_torre' then p_blocked_reason else null end,
+    updated_by = v_who, updated_at = now();
+
+  insert into silver.app_workflow_events(epm, action, by_user, de, a, comment)
+  values (p_epm, 'state', v_who, v_prev, p_state, nullif(p_comment,''));
+  return jsonb_build_object('epm', p_epm, 'de', v_prev, 'a', p_state);
+end $$;
+
+-- ---------- wf_comment: dejar una nota sin cambiar el estado ----------
+create or replace function wf_comment(p_epm text, p_comment text)
+returns jsonb language plpgsql security invoker as $$
+declare v_who text := coalesce(auth.email(), 'desconocido');
+begin
+  if nullif(p_comment,'') is null then
+    raise exception 'El comentario no puede ir vacío.' using errcode='22023';
+  end if;
+  insert into silver.app_workflow_events(epm, action, by_user, comment)
+  values (p_epm, 'comment', v_who, p_comment);
+  return jsonb_build_object('epm', p_epm, 'ok', true);
+end $$;
+
+-- ==========================================================================
+-- Vistas de gestión: el escáner (silver.findings) + el estado humano (workflow).
+-- "El escáner manda": los conteos de riesgo siempre salen de findings; el estado
+-- humano se muestra al lado, no cambia el número.
+-- ==========================================================================
+
+-- La cola de trabajo: una fila por app, con su riesgo REAL y su estado humano.
+create or replace view v_app_gestion as
+  select a.epm, a.app_name, a.tier, a.usage, a.exposed_internet,
+         a.it_vp, a.it_manager, a.contact_app,
+         coalesce(w.workflow_state, 'sin_asignar') as workflow_state,
+         w.assignee, w.blocked_reason, w.updated_by, w.updated_at,
+         count(f.finding_key) filter (where f.status not in ('fixed','not_observed')) as abiertos,
+         count(f.finding_key) filter (where lower(f.severity_scanner)='critical'
+                                        and f.status not in ('fixed','not_observed')) as criticos,
+         count(f.finding_key) filter (where f.status not in ('fixed','not_observed')
+                                        and f.kri_status is not null
+                                        and f.kri_status <> 'IN_TIME') as fuera_sla,
+         count(f.finding_key) filter (where f.status not in ('fixed','not_observed')
+                                        and f.sla_days is not null
+                                        and greatest(current_date - f.first_observed::date,0) > f.sla_days) as vencidos
+  from silver.applications a
+  left join silver.app_workflow w using (epm)
+  left join silver.findings f using (epm)
+  group by a.epm, a.app_name, a.tier, a.usage, a.exposed_internet,
+           a.it_vp, a.it_manager, a.contact_app,
+           w.workflow_state, w.assignee, w.blocked_reason, w.updated_by, w.updated_at;
+
+-- La "discrepancia": apps marcadas atendido/en_atención que el escáner SIGUE
+-- viendo con críticos abiertos. Con "el escáner manda" no es una alerta que
+-- salta, pero sí una fila que se puede mirar: el trabajo dice una cosa y Tenable
+-- otra. Es la que más vale la pena revisar.
+create or replace view v_discrepancia as
+  select * from v_app_gestion
+  where workflow_state in ('atendido','en_atencion') and criticos > 0
+  order by criticos desc;
+
+-- La bitácora de gestión, legible.
+create or replace view v_workflow_log as
+  select e.id, e.at, e.action, e.epm, a.app_name, e.by_user, e.de, e.a, e.comment
+  from silver.app_workflow_events e
+  left join silver.applications a using (epm)
+  order by e.at desc;
+
+-- ==========================================================================
+-- Permisos del workflow (van DESPUÉS del revoke a public de arriba, así que
+-- hay que otorgar explícito a authenticated y cerrar a anon/public otra vez).
+-- ==========================================================================
+alter table silver.app_workflow        enable row level security;
+alter table silver.app_workflow_events enable row level security;
+do $$ declare t text;
+begin
+  foreach t in array array['silver.app_workflow','silver.app_workflow_events'] loop
+    execute format('drop policy if exists solo_con_sesion on %s', t);
+    execute format('create policy solo_con_sesion on %s for all to authenticated using (true) with check (true)', t);
+    execute format('revoke all on %s from anon', t);
+    execute format('grant all on %s to authenticated', t);
+  end loop;
+end $$;
+grant usage, select on all sequences in schema silver to authenticated;
+grant select on v_app_gestion, v_discrepancia, v_workflow_log to authenticated;
+grant execute on function wf_assign(text,text)               to authenticated;
+grant execute on function wf_set_state(text,text,text,text)  to authenticated;
+grant execute on function wf_comment(text,text)              to authenticated;
+-- cerrar de nuevo lo que acabo de crear: public/anon fuera
+revoke execute on all functions in schema public from public, anon;
+revoke all on silver.app_workflow, silver.app_workflow_events from anon;
+
+-- Realtime: el workflow sí interesa en vivo (dos analistas trabajando la cola).
+do $$ begin
+  alter publication supabase_realtime add table silver.app_workflow;
+exception when duplicate_object then null; when undefined_object then null; end $$;
