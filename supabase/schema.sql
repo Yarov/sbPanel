@@ -124,6 +124,26 @@ create table if not exists silver.findings (
 -- create table if not exists NO agrega columnas si la tabla ya existía: para
 -- bases previas hay que alterar explícito (managed_by = la torre de infra).
 alter table silver.findings add column if not exists managed_by text;
+-- triage por hallazgo (fase 3): flags ortogonales al estado del escáner.
+alter table silver.findings add column if not exists es_falso_positivo boolean not null default false;
+alter table silver.findings add column if not exists es_riesgo_aceptado boolean not null default false;
+alter table silver.findings add column if not exists triage_by text;
+alter table silver.findings add column if not exists triage_at timestamptz;
+-- aceptación de riesgo como objeto (aprobador + expiración + controles); v_findings
+-- y v_risk_acceptances la referencian, por eso se crea aquí y no al final.
+create table if not exists silver.risk_acceptances (
+  id            bigserial primary key,
+  finding_key   text not null,
+  aprobado_por  text not null,
+  justificacion text not null,
+  controles     text,
+  evidencia_url text,
+  fecha_expiracion date not null,
+  estado        text not null default 'vigente',  -- vigente|expirada|revocada
+  creado_por    text,
+  creado_at     timestamptz default now()
+);
+create index if not exists ra_finding on silver.risk_acceptances(finding_key, estado);
 create index if not exists f_epm on silver.findings(epm);
 create index if not exists f_durable on silver.findings(durable_key);
 create index if not exists f_load on silver.findings(source, last_load_id);
@@ -435,6 +455,10 @@ begin
   from previos p;
   get diagnostics v_cerrados = row_count;
 
+  -- Expira aceptaciones de riesgo vencidas (re-alerta auditable): lo que se
+  -- aceptó "hasta la fecha X" y ya pasó, vuelve a contar.
+  perform expirar_aceptaciones();
+
   -- Auto-asignación (patrón ClickUp "when task created, assign to X"): las apps
   -- nuevas con hallazgos se auto-asignan a su IT Manager. Aquí tenemos ventaja
   -- sobre ClickUp — el IT Manager es dato de la app, así que es un JOIN, no un
@@ -534,9 +558,23 @@ create or replace view v_findings as
          a.it_svp, a.it_vp, a.it_manager, a.contact_app,
          greatest(current_date - f.first_observed::date, 0) as edad_dias,
          (f.sla_days is not null
-          and greatest(current_date - f.first_observed::date, 0) > f.sla_days) as vencido_real
+          and greatest(current_date - f.first_observed::date, 0) > f.sla_days) as vencido_real,
+         f.es_falso_positivo, f.es_riesgo_aceptado, f.triage_by,
+         (select ra.fecha_expiracion from silver.risk_acceptances ra
+          where ra.finding_key=f.finding_key and ra.estado='vigente'
+          order by ra.creado_at desc limit 1) as acepta_vence
   from silver.findings f
   left join silver.applications a using (epm);
+
+-- Aceptaciones de riesgo, legible (para auditoría: quién aceptó qué y hasta cuándo).
+create or replace view v_risk_acceptances as
+  select ra.id, ra.finding_key, f.title, f.asset, a.app_name, a.it_vp,
+         ra.aprobado_por, ra.justificacion, ra.controles, ra.fecha_expiracion, ra.estado,
+         ra.creado_por, ra.creado_at,
+         (ra.estado='vigente' and ra.fecha_expiracion < current_date) as por_expirar
+  from silver.risk_acceptances ra
+  left join silver.findings f using (finding_key)
+  left join silver.applications a on a.epm = f.epm;
 
 -- La cascada IT VP -> IT Manager -> App. Pocas filas: el front cascadea en cliente.
 create or replace view v_org_tree as
@@ -933,12 +971,13 @@ drop view if exists v_app_gestion;
 create view v_app_gestion as
   with abiertas as (
     select f.epm, silver.finding_weight(f.vpr, f.severity_scanner) as peso,
-           lower(f.severity_scanner) as sev, f.kri_status,
+           lower(f.severity_scanner) as sev, f.kri_status, f.es_riesgo_aceptado,
            (coalesce(f.kri_status,'') = 'NOT_REMEDIATED_IN_SLA'
             or (f.sla_days is not null
                 and greatest(current_date - f.first_observed::date,0) > f.sla_days)) as vencido
     from silver.findings f
-    where f.status not in ('fixed','not_observed')
+    -- falso positivo = no es real: fuera de todo conteo y del score.
+    where f.status not in ('fixed','not_observed') and not f.es_falso_positivo
   )
   select a.epm, a.app_name, a.tier, a.usage, a.exposed_internet, a.mx_regulatory,
          a.it_vp, a.it_manager, a.contact_app,
@@ -953,14 +992,18 @@ create view v_app_gestion as
          count(ab.*) filter (where ab.kri_status is not null and ab.kri_status <> 'IN_TIME') as fuera_sla,
          count(ab.*) filter (where ab.vencido)            as vencidos,
          count(ab.*) filter (where ab.vencido and ab.sev in ('critical','high')) as vencidos_altos,
+         count(ab.*) filter (where ab.es_riesgo_aceptado) as aceptados,
          silver.app_criticality(a.tier, a.usage, a.exposed_internet, a.mx_regulatory) as app_crit,
+         -- el score se calcula SOLO sobre lo NO aceptado: un riesgo formalmente
+         -- aceptado (con aprobador y vigencia) no debe empujar la cola.
          round(least(100,
              silver.app_criticality(a.tier, a.usage, a.exposed_internet, a.mx_regulatory)
-           * coalesce(max(ab.peso), 0)
-           * least(1.6, power(greatest(count(ab.*), 1), 0.15))
+           * coalesce(max(ab.peso) filter (where not ab.es_riesgo_aceptado), 0)
+           * least(1.6, power(greatest(count(ab.*) filter (where not ab.es_riesgo_aceptado), 1), 0.15))
            * ( 1
-               + 0.5 * (count(ab.*) filter (where ab.vencido and ab.sev in ('critical','high')) > 0)::int
-               + 0.3 * (count(ab.*) filter (where ab.vencido))::numeric / greatest(count(ab.*), 1) )
+               + 0.5 * (count(ab.*) filter (where ab.vencido and ab.sev in ('critical','high') and not ab.es_riesgo_aceptado) > 0)::int
+               + 0.3 * (count(ab.*) filter (where ab.vencido and not ab.es_riesgo_aceptado))::numeric
+                       / greatest(count(ab.*) filter (where not ab.es_riesgo_aceptado), 1) )
          ))::int as risk_score
   from silver.applications a
   left join silver.app_workflow w using (epm)
@@ -1080,3 +1123,117 @@ revoke execute on all functions in schema public from public, anon;
 do $$ begin
   alter publication supabase_realtime add table silver.task_watchers;
 exception when duplicate_object then null; when undefined_object then null; end $$;
+
+-- ==========================================================================
+-- FASE 3 — Triage POR HALLAZGO (modelo DefectDojo): falso_positivo y
+-- riesgo_aceptado son FLAGS ortogonales al estado del escáner, NO estados del
+-- workflow por-app. Un hallazgo puede estar activo (escáner lo ve) Y aceptado.
+-- Protegidos del reimport: load_batch NUNCA los toca (solo las RPCs de abajo),
+-- así que sobreviven a cada carga — el mismo hallazgo no vuelve a salir como
+-- pendiente. La identidad entre escaneos es durable_key (incluye asset|plugin).
+-- ==========================================================================
+alter table silver.findings add column if not exists es_falso_positivo boolean not null default false;
+alter table silver.findings add column if not exists es_riesgo_aceptado boolean not null default false;
+alter table silver.findings add column if not exists triage_by text;
+alter table silver.findings add column if not exists triage_at timestamptz;
+create index if not exists f_triage on silver.findings(es_falso_positivo, es_riesgo_aceptado);
+
+-- (la tabla silver.risk_acceptances se crea arriba, junto a findings)
+
+-- ---------- fnd_false_positive: marcar/desmarcar falso positivo ----------
+create or replace function fnd_false_positive(
+  p_finding_key text, p_reason text, p_undo boolean default false
+) returns jsonb language plpgsql security invoker as $$
+declare v_who text := coalesce(auth.email(),'desconocido'); v_epm text;
+begin
+  select epm into v_epm from silver.findings where finding_key=p_finding_key;
+  if not found then raise exception 'Hallazgo % no existe.', p_finding_key using errcode='23503'; end if;
+  update silver.findings set es_falso_positivo = not p_undo,
+    triage_by=v_who, triage_at=now(), updated_at=now() where finding_key=p_finding_key;
+  insert into silver.finding_events(finding_key, load_id, epm, event, a)
+  values (p_finding_key, '00000000-0000-0000-0000-000000000000'::uuid, v_epm,
+          case when p_undo then 'fp_quitado' else 'falso_positivo' end,
+          v_who || case when p_reason is not null then ' :: '||p_reason else '' end);
+  return jsonb_build_object('finding_key',p_finding_key,'es_falso_positivo', not p_undo);
+end $$;
+
+-- ---------- fnd_accept_risk: aceptar riesgo con vigencia y aprobador ----------
+create or replace function fnd_accept_risk(
+  p_finding_key text, p_aprobado_por text, p_justificacion text,
+  p_fecha_expiracion date, p_controles text default null, p_evidencia_url text default null
+) returns jsonb language plpgsql security invoker as $$
+declare v_who text := coalesce(auth.email(),'desconocido'); v_epm text;
+begin
+  select epm into v_epm from silver.findings where finding_key=p_finding_key;
+  if not found then raise exception 'Hallazgo % no existe.', p_finding_key using errcode='23503'; end if;
+  if p_fecha_expiracion <= current_date then
+    raise exception 'La aceptación de riesgo requiere una fecha de expiración futura.' using errcode='22023';
+  end if;
+  if nullif(p_aprobado_por,'') is null or nullif(p_justificacion,'') is null then
+    raise exception 'Aprobador y justificación son obligatorios.' using errcode='22023';
+  end if;
+  -- cierra aceptaciones vigentes previas del mismo hallazgo
+  update silver.risk_acceptances set estado='revocada'
+    where finding_key=p_finding_key and estado='vigente';
+  insert into silver.risk_acceptances(finding_key, aprobado_por, justificacion, controles,
+    evidencia_url, fecha_expiracion, creado_por)
+  values (p_finding_key, p_aprobado_por, p_justificacion, p_controles, p_evidencia_url,
+    p_fecha_expiracion, v_who);
+  update silver.findings set es_riesgo_aceptado=true, triage_by=v_who, triage_at=now(), updated_at=now()
+    where finding_key=p_finding_key;
+  insert into silver.finding_events(finding_key, load_id, epm, event, a, de)
+  values (p_finding_key, '00000000-0000-0000-0000-000000000000'::uuid, v_epm,
+          'riesgo_aceptado', 'vence '||p_fecha_expiracion, 'aprobó '||p_aprobado_por);
+  return jsonb_build_object('finding_key',p_finding_key,'vence',p_fecha_expiracion);
+end $$;
+
+-- ---------- fnd_revoke_acceptance: revocar la aceptación (vuelve a contar) ----------
+create or replace function fnd_revoke_acceptance(p_finding_key text)
+returns jsonb language plpgsql security invoker as $$
+declare v_who text := coalesce(auth.email(),'desconocido'); v_epm text;
+begin
+  select epm into v_epm from silver.findings where finding_key=p_finding_key;
+  update silver.risk_acceptances set estado='revocada' where finding_key=p_finding_key and estado='vigente';
+  update silver.findings set es_riesgo_aceptado=false, triage_by=v_who, triage_at=now(), updated_at=now()
+    where finding_key=p_finding_key;
+  insert into silver.finding_events(finding_key, load_id, epm, event, a)
+  values (p_finding_key, '00000000-0000-0000-0000-000000000000'::uuid, v_epm, 'aceptacion_revocada', v_who);
+  return jsonb_build_object('finding_key',p_finding_key,'es_riesgo_aceptado',false);
+end $$;
+
+-- Expira aceptaciones vencidas y re-activa el hallazgo (re-alerta auditable).
+-- Se corre en cada load_commit (abajo) y puede llamarse suelta.
+create or replace function expirar_aceptaciones() returns int language plpgsql security invoker as $$
+declare v_n int;
+begin
+  with vencidas as (
+    update silver.risk_acceptances set estado='expirada'
+    where estado='vigente' and fecha_expiracion < current_date
+    returning finding_key
+  ), reactiva as (
+    update silver.findings f set es_riesgo_aceptado=false, updated_at=now()
+    from vencidas v where f.finding_key=v.finding_key
+    returning f.finding_key, f.epm
+  )
+  insert into silver.finding_events(finding_key, load_id, epm, event, a)
+  select finding_key, '00000000-0000-0000-0000-000000000000'::uuid, epm,
+         'aceptacion_expirada', 'la aceptación venció — vuelve a contar'
+  from reactiva;
+  get diagnostics v_n = row_count;
+  return v_n;
+end $$;
+
+-- ---------- permisos fase 3 ----------
+alter table silver.risk_acceptances enable row level security;
+drop policy if exists solo_con_sesion on silver.risk_acceptances;
+create policy solo_con_sesion on silver.risk_acceptances for all to authenticated using (true) with check (true);
+revoke all on silver.risk_acceptances from anon;
+grant all on silver.risk_acceptances to authenticated;
+grant usage, select on all sequences in schema silver to authenticated;
+grant select on v_risk_acceptances to authenticated;
+revoke select on v_risk_acceptances from anon;
+grant execute on function fnd_false_positive(text,text,boolean)          to authenticated;
+grant execute on function fnd_accept_risk(text,text,text,date,text,text)  to authenticated;
+grant execute on function fnd_revoke_acceptance(text)                     to authenticated;
+grant execute on function expirar_aceptaciones()                          to authenticated;
+revoke execute on all functions in schema public from public, anon;
