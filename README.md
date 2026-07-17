@@ -62,51 +62,56 @@ Tres zonas: **la máquina del analista** (prepara el archivo), **el navegador** 
 sube por streaming, y muestra todo), y **Postgres** (concilia, guarda y expone). Los datos
 fluyen de arriba hacia abajo en la carga, y de abajo hacia arriba en la lectura.
 
+> **Cómo leer el diagrama.** Cada caja tiene una forma según lo que es:
+> **▭ código** (un archivo o componente) · **🛢 dato** (una tabla o archivo de datos) ·
+> **⬡ RPC** (una función que escribe en la base). El color marca la zona: azul =
+> máquina del analista, morado = navegador, verde = Postgres. Los números ①–⑤ son
+> el orden del flujo, y cada flecha dice *qué pasa* en ese paso.
+
 ```mermaid
 flowchart TB
-  subgraph local["1 · Maquina del analista"]
-    xlsx[("Export Tenable<br/>xlsx · 91 cols · ~250 MB")]
-    clean["clean_tenable.py<br/>xlsx a CSV de 40 cols"]
-    slim[("CSV slim<br/>~35 MB")]
-    xlsx --> clean --> slim
-  end
+  xlsx[("🛢 Export de Tenable<br/>xlsx · 91 columnas · ~250 MB")]
+  clean["▭ clean_tenable.py<br/>limpia y adelgaza"]
+  slim[("🛢 CSV slim<br/>40 columnas · ~35 MB")]
+  xlsx -->|"① el analista limpia el archivo"| clean -->|genera| slim
 
-  subgraph browser["2 · Navegador · React/Vite"]
-    direction TB
-    csv["csv.ts<br/>CsvParser: parseo incremental"]
-    ing["ingest.ts<br/>mapTenable + lotes de 1500"]
-    ui["App.tsx<br/>Dashboard · Gestion · App-Detail"]
-    charts["Charts.tsx<br/>Recharts"]
-    sb["supabase.ts<br/>cliente + Auth"]
-    csv --> ing
-    ui --> charts
-    ui -.lee.-> sb
-    ing -.escribe.-> sb
-  end
-  slim -->|drag and drop| csv
+  csv["▭ csv.ts<br/>parsea el CSV por pedazos"]
+  ing["▭ ingest.ts<br/>mapea y arma lotes de 1500"]
+  slim -->|"② arrastra y suelta en la app"| csv -->|fila a fila| ing
 
-  subgraph pg["3 · Supabase · Postgres + Realtime"]
-    direction TB
-    subgraph b["bronze — el lago"]
-      loads[("loads<br/>acta de cada carga")]
-    end
-    subgraph s["silver — el modelo"]
-      apps[("applications<br/>el APM")]
-      finds[("findings<br/>el hallazgo")]
-      wf[("app_workflow<br/>estado humano")]
-      evs[("finding_events<br/>+ workflow_events<br/>bitacora append-only")]
-    end
-    subgraph p["public — capa de lectura"]
-      views["v_app_gestion · v_findings<br/>v_discrepancia · v_org_tree ...<br/>+ dashboard_metrics()<br/>+ metricas_ejecutivas()"]
-    end
-    rpc{{"RPCs de ingesta<br/>load_begin / batch / commit"}}
-    loads --> rpc --> apps & finds & wf & evs
-    apps & finds & wf & evs --> views
-  end
+  rpc{{"⬡ load_begin / batch / commit<br/>el motor de conciliacion"}}
+  ing -->|"③ sube cada lote (RPC)"| rpc
 
-  sb -->|RPC| rpc
-  views -->|PostgREST / Realtime| sb
+  loads[("🛢 bronze.loads<br/>acta de la carga")]
+  apps[("🛢 silver.applications<br/>el APM (la app)")]
+  finds[("🛢 silver.findings<br/>el hallazgo")]
+  wf[("🛢 silver.app_workflow<br/>estado humano")]
+  evs[("🛢 silver.*_events<br/>bitacora append-only")]
+  rpc -->|"④ concilia con guardas<br/>y escribe"| loads & apps & finds & wf & evs
+
+  views["▭ public.v_*<br/>vistas de lectura<br/>+ dashboard_metrics()<br/>+ metricas_ejecutivas()"]
+  apps & finds & wf & evs -->|proyectan| views
+
+  ui["▭ App.tsx + Charts.tsx<br/>Dashboard · Gestion · App-Detail"]
+  views -->|"⑤ el front lee y pinta<br/>(PostgREST + Realtime)"| ui
+
+  classDef local fill:#0b3a5e,stroke:#3b82f6,color:#e6f0fb
+  classDef browser fill:#3a1d5e,stroke:#a78bfa,color:#f0e6fb
+  classDef db fill:#0f3d2e,stroke:#34d399,color:#e6fbf1
+  classDef motor fill:#5e2a0b,stroke:#fb923c,color:#fbeee6
+  class xlsx,clean,slim local
+  class csv,ing,ui browser
+  class loads,apps,finds,wf,evs,views db
+  class rpc motor
 ```
+
+**El flujo en 5 pasos (los números del diagrama):**
+
+1. **El analista limpia el archivo.** `clean_tenable.py` toma el xlsx de 250 MB y saca un CSV de 40 columnas (~35 MB). Corre local porque el navegador no puede abrir xlsx.
+2. **Se sube a la app.** `csv.ts` parsea el CSV por pedazos (sin cargarlo entero) e `ingest.ts` mapea cada fila y arma lotes de 1,500.
+3. **Cada lote se sube por RPC.** No hay INSERT directo: todo pasa por `load_begin → load_batch → load_commit`.
+4. **El motor concilia con guardas** y escribe en `bronze` (el acta) y `silver` (el modelo: la app, el hallazgo, el estado, la bitácora).
+5. **El front lee las vistas `public`** y las pinta. Realtime le avisa cuando una carga cambia de estado, sin recargar.
 
 ### Cada pieza, en detalle
 
