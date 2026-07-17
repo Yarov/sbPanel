@@ -58,40 +58,92 @@ se sigue **por app**, no por cada uno de los ~63,600 hallazgos.
 
 ## Arquitectura
 
+Tres zonas: **la máquina del analista** (prepara el archivo), **el navegador** (parsea y
+sube por streaming, y muestra todo), y **Postgres** (concilia, guarda y expone). Los datos
+fluyen de arriba hacia abajo en la carga, y de abajo hacia arriba en la lectura.
+
 ```mermaid
 flowchart TB
-  subgraph local["Maquina del analista"]
-    xlsx["Export Tenable<br/>.xlsx - 91 columnas - ~250 MB"]
-    clean["scripts/clean_tenable.py<br/>a CSV 40 columnas (~90% mas ligero)"]
-    xlsx --> clean
+  subgraph local["1 · Maquina del analista"]
+    xlsx[("Export Tenable<br/>xlsx · 91 cols · ~250 MB")]
+    clean["clean_tenable.py<br/>xlsx a CSV de 40 cols"]
+    slim[("CSV slim<br/>~35 MB")]
+    xlsx --> clean --> slim
   end
 
-  subgraph front["PWA (React/Vite)"]
-    upload["Cargar CSV<br/>streaming, sin morir el navegador"]
-    dash["Dashboard + Vista ejecutiva"]
-    cola["Cola de remediacion a App-Detail"]
+  subgraph browser["2 · Navegador · React/Vite"]
+    direction TB
+    csv["csv.ts<br/>CsvParser: parseo incremental"]
+    ing["ingest.ts<br/>mapTenable + lotes de 1500"]
+    ui["App.tsx<br/>Dashboard · Gestion · App-Detail"]
+    charts["Charts.tsx<br/>Recharts"]
+    sb["supabase.ts<br/>cliente + Auth"]
+    csv --> ing
+    ui --> charts
+    ui -.lee.-> sb
+    ing -.escribe.-> sb
   end
-  clean -->|CSV slim| upload
+  slim -->|drag and drop| csv
 
-  subgraph db["Supabase (Postgres)"]
-    bronze["bronze.loads<br/>acta de cada carga"]
-    silver["silver.*<br/>applications - findings - workflow - eventos"]
-    public["public.v_*<br/>capa de lectura (PostgREST solo expone public)"]
-    silver --> public
+  subgraph pg["3 · Supabase · Postgres + Realtime"]
+    direction TB
+    subgraph b["bronze — el lago"]
+      loads[("loads<br/>acta de cada carga")]
+    end
+    subgraph s["silver — el modelo"]
+      apps[("applications<br/>el APM")]
+      finds[("findings<br/>el hallazgo")]
+      wf[("app_workflow<br/>estado humano")]
+      evs[("finding_events<br/>+ workflow_events<br/>bitacora append-only")]
+    end
+    subgraph p["public — capa de lectura"]
+      views["v_app_gestion · v_findings<br/>v_discrepancia · v_org_tree ...<br/>+ dashboard_metrics()<br/>+ metricas_ejecutivas()"]
+    end
+    rpc{{"RPCs de ingesta<br/>load_begin / batch / commit"}}
+    loads --> rpc --> apps & finds & wf & evs
+    apps & finds & wf & evs --> views
   end
-  upload -->|load_begin / load_batch / load_commit| bronze
-  bronze --> silver
-  public --> dash
-  public --> cola
+
+  sb -->|RPC| rpc
+  views -->|PostgREST / Realtime| sb
 ```
 
-**Por qué 3 capas (medallion):**
+### Cada pieza, en detalle
 
-| Capa | Qué es | Por qué |
+**Zona 1 — la máquina del analista** (fuera de la app)
+
+| Pieza | Qué hace | Detalle que importa |
 |---|---|---|
-| `bronze.loads` | El acta de cada carga: quién, cuándo, fecha del dato, filas, motivo si se frenó. | Auditoría e idempotencia. La verdad histórica de qué llegó y cuándo. |
-| `silver.*` | El modelo normalizado: el APM como entidad, el hallazgo, el workflow, la bitácora. | Donde vive la lógica. Un solo lugar para el árbol org (no repetido 63,600 veces). |
-| `public.v_*` | Vistas de lectura para el front. | **PostgREST solo expone `public`.** El modelo vive en silver; el front lee estas vistas. |
+| **`scripts/clean_tenable.py`** | Convierte el xlsx de Tenable (91 columnas, ~250 MB) al CSV slim de 40 columnas (~35 MB). | Corre local porque el navegador no puede abrir xlsx (es un zip; requeriría ~3–5 GB en RAM). Usa `openpyxl` en modo `read_only` para streamear fila por fila. Aborta si el export cambió de columnas o trae filas sin `id`. |
+
+**Zona 2 — el navegador** (`src/`)
+
+| Archivo | Qué hace | Detalle que importa |
+|---|---|---|
+| **`lib/csv.ts`** | Parseo de CSV. `CsvParser` es **incremental**: recibe pedazos del archivo y devuelve las filas ya completas, sin tener nunca el archivo entero en memoria. `parseCsv`/`toObjects` son la versión de un golpe (para los CSV chicos de AppSec). | El estado del parser (campo a medias, comillas abiertas) sobrevive entre pedazos. Maneja comillas escapadas partidas entre chunks. |
+| **`lib/ingest.ts`** | El puente navegador→base. `ingestTenable` streamea el CSV, mapea cada fila (`mapTenable`: convierte "TBD"/"None" a null, "120d"→120, el `state` de Tenable a nuestro `status`) y sube lotes de 1500 vía RPC. `validarTenable` corta si faltan columnas. | Convierte 5,038 bytes/fila de xlsx crudo a 486 útiles. Pico de RAM: ~42 MB. Un `scan_id` (uuid) marca todas las filas de la carga. |
+| **`supabase.ts`** | El cliente de Supabase (`@supabase/supabase-js`) y el estado de sesión (Auth). | `hasSupabase` valida que existan las env vars; si no, la app muestra "Falta Supabase". |
+| **`App.tsx`** | Todos los componentes: `Login`, `Dashboard`, `Hallazgos`, `Gestion`→`AppDetail` (con `SeguimientoTab`, `AccionesPanel`, `Timeline`, `VulnsTab`, `ContactosTab`), `Upload`, `Actividad`. | Cada componente **solo lee vistas `v_*` y llama RPCs** — nunca toca las tablas directo. |
+| **`Charts.tsx`** | Las gráficas (Recharts): `Donut`, `StackH` (barras apiladas por severidad), `Aging`, `Trend` (línea nuevos-vs-remediados), `TopBars`. | Tema oscuro Scotia. Colores por severidad y por KRI. |
+
+**Zona 3 — Postgres** (`supabase/schema.sql`)
+
+| Capa | Contenido | Qué hace / por qué |
+|---|---|---|
+| **`bronze`** | `loads` | El **acta** de cada carga: quién, cuándo, la *fecha del dato* (del contenido, no del reloj), cuántas filas, y el motivo si se frenó. Es la memoria histórica y la base de la idempotencia. El archivo `.csv.gz` puede guardarse aparte en Storage. |
+| **`silver`** | `applications`, `findings`, `app_workflow`, `finding_events`, `app_workflow_events`, `task_watchers`, `risk_acceptances`, `app_scans`, `project_epm_map` | El **modelo** donde vive la lógica. El APM (`applications`) es la entidad de primer nivel — el árbol org se guarda una vez, no repetido en cada hallazgo. Las tablas `*_events` son bitácoras append-only (la auditoría que no se puede reconstruir después). |
+| **`public`** | Vistas `v_*` + funciones `dashboard_metrics()`, `metricas_ejecutivas()` | La **capa de lectura**. PostgREST (la API REST de Supabase) **solo expone `public`**, así que el modelo vive en silver y el front lee estas vistas. También aísla el front de cambios internos del modelo. |
+| **RPCs de ingesta** | `load_begin` → `load_batch` → `load_commit` (+ `load_abort`) | El **motor de conciliación** (ver la sección de ingesta). Toda escritura de datos pasa por aquí; el front nunca hace INSERT/UPDATE directo. |
+
+**El flujo en una línea:** el analista limpia el xlsx → el navegador lo streamea y lo sube
+por lotes → el motor (RPCs) lo concilia contra `bronze`+`silver` con guardas → las vistas
+`public` lo exponen → el front las lee y las pinta. Realtime avisa al front cuando una
+carga cambia de estado, sin recargar.
+
+**Por qué 3 capas (patrón medallion):** separar *lo que llegó* (bronze, inmutable) de *el
+modelo* (silver, con la lógica) de *lo que se muestra* (public, estable para el front)
+permite reprocesar sin volver a pedir el archivo, cambiar el modelo sin romper el front, y
+auditar qué se cargó y cuándo.
 
 ---
 
