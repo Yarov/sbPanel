@@ -379,7 +379,7 @@ function Hallazgos() {
   useEffect(() => {
     let cancel = false;
     (async () => {
-      let query = supabase.from("findings").select("*", { count: "exact" });
+      let query = supabase.from("v_findings").select("*", { count: "exact" });
       const term = q.trim().replace(/[,()]/g, " ");
       if (term) query = query.or(`asset.ilike.*${term}*,title.ilike.*${term}*,cve.ilike.*${term}*,epm.ilike.*${term}*,app_name.ilike.*${term}*,it_vp.ilike.*${term}*,it_manager.ilike.*${term}*`);
       if (f.sev) query = query.eq("severity_scanner", f.sev);
