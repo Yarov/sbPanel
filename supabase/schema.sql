@@ -993,6 +993,9 @@ create view v_app_gestion as
          count(ab.*) filter (where ab.vencido)            as vencidos,
          count(ab.*) filter (where ab.vencido and ab.sev in ('critical','high')) as vencidos_altos,
          count(ab.*) filter (where ab.es_riesgo_aceptado) as aceptados,
+         -- pendientes de decisión humana: críticos/altos abiertos sin disposición
+         -- (el CTE ya excluye falsos positivos; aquí se descartan los aceptados).
+         count(ab.*) filter (where ab.sev in ('critical','high') and not ab.es_riesgo_aceptado) as sin_triar,
          silver.app_criticality(a.tier, a.usage, a.exposed_internet, a.mx_regulatory) as app_crit,
          -- el score se calcula SOLO sobre lo NO aceptado: un riesgo formalmente
          -- aceptado (con aprobador y vigencia) no debe empujar la cola.

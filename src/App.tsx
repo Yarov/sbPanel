@@ -8,13 +8,6 @@ import {
   Loader2, Search, CheckCircle2, AlertTriangle, X, ChevronLeft, ChevronRight,
 } from "lucide-react";
 
-type Finding = {
-  finding_key: string; source: string; epm: string | null; asset: string | null;
-  title: string; cve: string | null; severity_scanner: string | null; severity_scotia: string | null;
-  status: string; first_observed: string; kri_status: string | null; remaining_days: number | null;
-  it_vp: string | null; it_manager: string | null; app_name: string | null;
-  sla_days: number | null; edad_dias: number; vencido_real: boolean; usage: string | null;
-};
 type Activity = {
   id: number; at: string; event: string; finding_key: string; de: string | null; a: string | null;
   title: string | null; asset: string | null; app_name: string | null; it_vp: string | null;
@@ -362,87 +355,104 @@ function Dashboard() {
 }
 
 // ---------- Hallazgos (búsqueda avanzada) ----------
-function Hallazgos() {
+// Un hallazgo en la lente global. Trae su disposición y a qué app pertenece.
+type LensFinding = {
+  finding_key: string; severity_scanner: string | null; vpr: number | null; title: string;
+  asset: string | null; cve: string | null; status: string; kri_status: string | null;
+  sla_days: number | null; edad_dias: number; vencido_real: boolean;
+  es_falso_positivo: boolean; es_riesgo_aceptado: boolean; acepta_vence: string | null;
+  epm: string | null; app_name: string | null; it_vp: string | null; usage: string | null;
+};
+// Saved views: presets sobre v_findings. Cada uno aplica su filtro a la query.
+const HOY30 = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
+const VIEWS: { id: string; txt: string; f: (q: any) => any }[] = [
+  { id: "todos", txt: "Todos", f: (q) => q },
+  { id: "sin_triar", txt: "Sin triar", f: (q) => q.in("severity_scanner", ["Critical", "High"]).in("status", ["open", "resurfaced"]).eq("es_falso_positivo", false).eq("es_riesgo_aceptado", false) },
+  { id: "crit_prod", txt: "Críticos PROD", f: (q) => q.eq("severity_scanner", "Critical").eq("usage", "Prod").in("status", ["open", "resurfaced"]) },
+  { id: "vencidos", txt: "Vencidos", f: (q) => q.eq("vencido_real", true).in("status", ["open", "resurfaced"]) },
+  { id: "acept", txt: "R. aceptado x vencer", f: (q) => q.eq("es_riesgo_aceptado", true).lte("acepta_vence", HOY30) },
+];
+
+// La lente "Por hallazgo": la tabla global, accionable (triar en la fila) y con
+// el estado del escáner + la disposición + el estado de la app padre.
+function FindingLens({ wfMap, onOpenApp }: { wfMap: Map<string, string>; onOpenApp: (epm: string) => void }) {
   const PAGE = 50;
-  const [rows, setRows] = useState<Finding[]>([]);
+  const [rows, setRows] = useState<LensFinding[]>([]);
   const [count, setCount] = useState(0);
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const [page, setPage] = useState(0);
   const [q, setQ] = useState("");
-  const [f, setF] = useState({ sev: "", status: "", source: "", it_vp: "", it_manager: "" });
-  const [org, setOrg] = useState<Org[]>([]);
+  const [view, setView] = useState("sin_triar");
+  const [sev, setSev] = useState("");
+  const cols = "finding_key,severity_scanner,vpr,title,asset,cve,status,kri_status,sla_days,edad_dias,vencido_real,es_falso_positivo,es_riesgo_aceptado,acepta_vence,epm,app_name,it_vp,usage";
 
+  async function load() {
+    let query = VIEWS.find((v) => v.id === view)!.f(supabase.from("v_findings").select(cols, { count: "exact" }));
+    const term = q.trim().replace(/[,()]/g, " ");
+    if (term) query = query.or(`asset.ilike.*${term}*,title.ilike.*${term}*,cve.ilike.*${term}*,app_name.ilike.*${term}*`);
+    if (sev) query = query.eq("severity_scanner", sev);
+    query = query.order("vpr", { ascending: false, nullsFirst: false }).range(page * PAGE, page * PAGE + PAGE - 1);
+    const { data, count } = await query;
+    setRows((data ?? []) as LensFinding[]); setCount(count ?? 0);
+  }
+  useEffect(() => { load(); }, [q, view, sev, page]); // eslint-disable-line
+  // contadores en vivo de cada saved view (head-count en paralelo)
   useEffect(() => {
-    supabase.from("v_org_tree").select("it_vp,it_manager,app_name,epm,abiertos").then((r) =>
-      setOrg((r.data ?? []) as Org[]));
-  }, []);
+    Promise.all(VIEWS.map((v) => v.f(supabase.from("v_findings").select("finding_key", { count: "exact", head: true })).then((r: any) => [v.id, r.count ?? 0] as const)))
+      .then((pairs) => setCounts(Object.fromEntries(pairs)));
+  }, [rows]);
 
-  useEffect(() => {
-    let cancel = false;
-    (async () => {
-      let query = supabase.from("v_findings").select("*", { count: "exact" });
-      const term = q.trim().replace(/[,()]/g, " ");
-      if (term) query = query.or(`asset.ilike.*${term}*,title.ilike.*${term}*,cve.ilike.*${term}*,epm.ilike.*${term}*,app_name.ilike.*${term}*,it_vp.ilike.*${term}*,it_manager.ilike.*${term}*`);
-      if (f.sev) query = query.eq("severity_scanner", f.sev);
-      if (f.status) query = query.eq("status", f.status);
-      if (f.source) query = query.eq("source", f.source);
-      if (f.it_vp) query = query.eq("it_vp", f.it_vp);
-      if (f.it_manager) query = query.eq("it_manager", f.it_manager);
-      query = query.order("last_seen", { ascending: false }).range(page * PAGE, page * PAGE + PAGE - 1);
-      const { data, count } = await query;
-      if (!cancel) { setRows((data ?? []) as Finding[]); setCount(count ?? 0); }
-    })();
-    return () => { cancel = true; };
-  }, [q, f, page]);
-
-  const uniq = (xs: string[]) => [...new Set(xs)].sort();
-  const vps = uniq(org.map((o) => o.it_vp));
-  const managers = uniq(org.filter((o) => !f.it_vp || o.it_vp === f.it_vp).map((o) => o.it_manager));
-
-  const set = (k: string, v: string) => { setF((p) => ({ ...p, [k]: v })); setPage(0); };
   const pages = Math.ceil(count / PAGE);
+  const go = (v: string) => { setView(v); setPage(0); };
 
   return (
     <div className="panel">
+      <div className="saved-views">
+        {VIEWS.map((v) => (
+          <button key={v.id} className={`sv ${view === v.id ? "on" : ""}`} onClick={() => go(v.id)}>
+            {v.txt}{counts[v.id] != null ? <span className="sv-n">{counts[v.id].toLocaleString()}</span> : null}
+          </button>
+        ))}
+      </div>
       <div className="filters-bar">
         <div className="search-wrap grow">
           <Search size={16} className="i-muted" />
           <input value={q} onChange={(e) => { setQ(e.currentTarget.value); setPage(0); }}
-            placeholder="Buscar activo, título, CVE, EPM, app, IT VP, IT Manager…" />
+            placeholder="Buscar activo, título, CVE, app…" />
         </div>
-        <select value={f.it_vp} onChange={(e) => { setF((p) => ({ ...p, it_vp: e.currentTarget.value, it_manager: "" })); setPage(0); }}>
-          <option value="">IT VP</option>{vps.map((a) => <option key={a}>{a}</option>)}
-        </select>
-        <select value={f.it_manager} onChange={(e) => set("it_manager", e.currentTarget.value)}>
-          <option value="">IT Manager</option>{managers.map((a) => <option key={a}>{a}</option>)}
-        </select>
-        <select value={f.sev} onChange={(e) => set("sev", e.currentTarget.value)}>
+        <select value={sev} onChange={(e) => { setSev(e.currentTarget.value); setPage(0); }}>
           <option value="">Severidad</option>{SEVS.map((s) => <option key={s}>{s}</option>)}
         </select>
-        <select value={f.status} onChange={(e) => set("status", e.currentTarget.value)}>
-          <option value="">Estado</option>{STATUSES.map((s) => <option key={s}>{s}</option>)}
-        </select>
-        <select value={f.source} onChange={(e) => set("source", e.currentTarget.value)}>
-          <option value="">Fuente</option>{SOURCES.map((s) => <option key={s.id} value={s.id}>{s.id}</option>)}
-        </select>
       </div>
-      <p className="hint">{count.toLocaleString()} hallazgos</p>
+      <p className="hint">{count.toLocaleString()} hallazgos · el <b>estado del escáner</b> es la verdad (read-only),
+        la <b>disposición</b> la decides tú, el <b>estado de la app</b> lleva a su gestión.</p>
       <div className="tbl-wrap">
         <table className="tbl">
-          <thead><tr><th>Sev</th><th>Estado</th><th>Activo</th><th>Título</th><th>App</th><th>IT VP</th><th>IT Manager</th><th>KRI</th></tr></thead>
+          <thead><tr><th>Sev</th><th className="num">VPR</th><th>Título</th><th>Activo</th><th>App</th>
+            <th>Escáner</th><th className="num">SLA</th><th>Disposición</th><th>Estado app</th><th></th></tr></thead>
           <tbody>
-            {rows.map((r) => (
-              <tr key={r.finding_key}>
-                <td><span className={sevClass(r.severity_scanner)}>{r.severity_scanner ?? "—"}</span></td>
-                <td><span className={`st st-${r.status}`}>{r.status}</span></td>
-                <td className="mono">{r.asset}</td>
-                <td className="clip">{r.title}</td>
-                <td className="clip">{r.app_name ?? r.epm ?? "—"}</td>
-                <td>{r.it_vp ?? "—"}</td>
-                <td>{r.it_manager ?? "—"}</td>
-                <td>{r.kri_status ?? "—"}{r.remaining_days != null ? ` · ${r.remaining_days}d` : ""}</td>
-              </tr>
-            ))}
-            {!rows.length && <tr><td colSpan={8} className="empty">Sin resultados.</td></tr>}
+            {rows.map((r) => {
+              const sla = r.sla_days != null ? r.edad_dias - r.sla_days : null;
+              const wf = r.epm ? wfMap.get(r.epm) : undefined;
+              return (
+                <tr key={r.finding_key} className={r.es_falso_positivo || r.es_riesgo_aceptado ? "row-muted" : ""}>
+                  <td><span className={sevClass(r.severity_scanner)}>{r.severity_scanner ?? "—"}</span></td>
+                  <td className="num">{r.vpr ?? "—"}</td>
+                  <td className="clip">{r.title}</td>
+                  <td className="mono clip">{r.asset}</td>
+                  <td className="clip">{r.app_name ?? r.epm ?? "—"}</td>
+                  <td><span className={`st st-${r.status}`}>{r.status}</span></td>
+                  <td className={`num ${r.vencido_real ? "warn" : ""}`}>{sla != null ? (sla > 0 ? `-${sla}d` : `${-sla}d`) : "—"}</td>
+                  <td><Disp v={r} /></td>
+                  <td>{wf && r.epm
+                    ? <button className="wf-link" onClick={() => onOpenApp(r.epm!)} title="Ir a gestionar la app">
+                        <span className={`akind akind-${WF[wf]?.cls ?? "gris"}`}>{WF[wf]?.txt ?? wf}</span> ↗</button>
+                    : <span className="dim">—</span>}</td>
+                  <td className="row-acts"><Triar v={r} onChange={load} /></td>
+                </tr>
+              );
+            })}
+            {!rows.length && <tr><td colSpan={10} className="empty">Sin resultados.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -590,7 +600,7 @@ type AppGestion = {
   contact_app: string | null; workflow_state: string; assignee: string | null;
   blocked_reason: string | null; updated_by: string | null; updated_at: string | null;
   abiertos: number; criticos: number; fuera_sla: number; vencidos: number;
-  vencidos_altos: number; app_crit: number; risk_score: number;
+  vencidos_altos: number; app_crit: number; risk_score: number; sin_triar: number;
   commitment_date: string | null; priority: string | null;
   compromiso_vencido: boolean; watchers: number;
 };
@@ -619,15 +629,18 @@ type VFinding = {
   es_falso_positivo: boolean; es_riesgo_aceptado: boolean; acepta_vence: string | null;
 };
 
+// Workbench de gestión: una sola superficie, dos lentes del mismo dato.
+// Por aplicación (el rollup: asignas y das seguimiento) · Por hallazgo (el grano
+// fino: validas/triás cada issue). Clic en una app abre su App-Detail.
 function Gestion() {
-  const [rows, setRows] = useState<AppGestion[]>([]);
-  const [f, setF] = useState({ estado: "", vp: "", solo_criticos: false });
+  const [apps, setApps] = useState<AppGestion[]>([]);
+  const [lens, setLens] = useState<"apps" | "find">("apps");
   const [selEpm, setSelEpm] = useState<string | null>(null);
 
   async function load() {
     const { data } = await supabase.from("v_app_gestion").select("*")
       .order("risk_score", { ascending: false }).order("vencidos", { ascending: false });
-    setRows((data ?? []) as AppGestion[]);
+    setApps((data ?? []) as AppGestion[]);
   }
   useEffect(() => { load(); }, []);
   useEffect(() => {
@@ -639,16 +652,40 @@ function Gestion() {
 
   if (selEpm) return <AppDetail epm={selEpm} onBack={() => { setSelEpm(null); load(); }} />;
 
-  const vps = [...new Set(rows.map((r) => r.it_vp).filter(Boolean) as string[])].sort();
-  const vista = rows.filter((r) =>
+  const wfMap = new Map(apps.map((a) => [a.epm, a.workflow_state]));
+
+  return (
+    <div>
+      <div className="workbench-h">
+        <div>
+          <h2>Gestión</h2>
+          <span className="hint">Validar y dar seguimiento al estado de cada issue.</span>
+        </div>
+        <div className="lens-switch">
+          <button className={lens === "apps" ? "on" : ""} onClick={() => setLens("apps")}>▦ Por aplicación</button>
+          <button className={lens === "find" ? "on" : ""} onClick={() => setLens("find")}>≣ Por hallazgo</button>
+        </div>
+      </div>
+      {lens === "apps"
+        ? <AppQueue apps={apps} onOpen={setSelEpm} />
+        : <FindingLens wfMap={wfMap} onOpenApp={setSelEpm} />}
+    </div>
+  );
+}
+
+// Lente Por aplicación: la cola por risk score. La columna "Sin triar" conecta
+// los dos granos — son los hallazgos de la app que esperan decisión humana.
+function AppQueue({ apps, onOpen }: { apps: AppGestion[]; onOpen: (epm: string) => void }) {
+  const [f, setF] = useState({ estado: "", vp: "", solo_criticos: false });
+  const vps = [...new Set(apps.map((r) => r.it_vp).filter(Boolean) as string[])].sort();
+  const vista = apps.filter((r) =>
     (!f.estado || r.workflow_state === f.estado) &&
     (!f.vp || r.it_vp === f.vp) &&
     (!f.solo_criticos || r.criticos > 0));
-
   return (
     <div className="panel">
       <div className="filters-bar">
-        <h2 className="grow">Cola de remediación · {vista.length} apps</h2>
+        <span className="hint grow">{vista.length} apps · el riesgo lo dice el escáner, el estado es del equipo. Clic para gestionar.</span>
         <select value={f.vp} onChange={(e) => setF((p) => ({ ...p, vp: e.currentTarget.value }))}>
           <option value="">Todos los IT VP</option>{vps.map((v) => <option key={v}>{v}</option>)}
         </select>
@@ -658,14 +695,13 @@ function Gestion() {
         <button className={`chip-toggle ${f.solo_criticos ? "on" : ""}`}
           onClick={() => setF((p) => ({ ...p, solo_criticos: !p.solo_criticos }))}>Solo con críticos</button>
       </div>
-      <p className="hint">El riesgo (críticos, vencidos) lo dice el escáner. El estado es el seguimiento del equipo — no cambia el número. Clic en una app para gestionarla.</p>
       <div className="tbl-wrap">
         <table className="tbl tbl-click">
           <thead><tr><th className="num">Risk</th><th>App</th><th>IT VP</th><th>Estado</th><th>Asignado</th>
-            <th className="num">Crít</th><th className="num">Venc.</th><th className="num">Abiertos</th></tr></thead>
+            <th className="num">Crít</th><th className="num">Venc.</th><th className="num">Sin triar</th><th className="num">Abiertos</th></tr></thead>
           <tbody>
             {vista.map((r) => (
-              <tr key={r.epm} onClick={() => setSelEpm(r.epm)}>
+              <tr key={r.epm} onClick={() => onOpen(r.epm)}>
                 <td className="num"><Risk score={r.risk_score} /></td>
                 <td className="clip">{r.app_name ?? r.epm}
                   {r.exposed_internet ? <span className="badge badge-exp" title="Expuesta a internet">internet</span> : null}
@@ -680,10 +716,11 @@ function Gestion() {
                 <td>{r.assignee ?? "—"}</td>
                 <td className={`num ${r.criticos ? "hot" : ""}`}>{r.criticos}</td>
                 <td className={`num ${r.vencidos ? "warn" : ""}`}>{r.vencidos}</td>
+                <td className="num">{r.sin_triar ? <span className="untriaged" title="Críticos/altos sin decisión humana">{r.sin_triar}</span> : "0"}</td>
                 <td className="num">{r.abiertos}</td>
               </tr>
             ))}
-            {!vista.length && <tr><td colSpan={8} className="empty">Sin apps. Carga un escaneo.</td></tr>}
+            {!vista.length && <tr><td colSpan={9} className="empty">Sin apps. Carga un escaneo.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -901,22 +938,66 @@ function Timeline({ log }: { log: WfEvent[] }) {
 }
 
 // Pestaña Vulnerabilidades: los hallazgos de esta app, con triage por fila.
-function VulnsTab({ vulns, onChange }: { vulns: VFinding[]; onChange: () => void }) {
+// Triage de UN hallazgo: popover inline (reemplaza los prompt() encadenados).
+// Falso positivo es un toggle; aceptar riesgo pide aprobador + justificación +
+// fecha (obligatoria). Se usa igual en la lente por hallazgo y en VulnsTab.
+type TriData = { finding_key: string; title: string; es_falso_positivo: boolean; es_riesgo_aceptado: boolean; acepta_vence?: string | null };
+function Triar({ v, onChange }: { v: TriData; onChange: () => void }) {
+  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [ap, setAp] = useState(""); const [ju, setJu] = useState(""); const [ve, setVe] = useState("");
+  async function run(fn: () => PromiseLike<{ error: any }>) {
+    setBusy(true); setErr(""); const { error } = await fn(); setBusy(false);
+    if (error) { setErr(error.message); return; }
+    setOpen(false); onChange();
+  }
+  const fp = () => run(() => supabase.rpc("fnd_false_positive",
+    { p_finding_key: v.finding_key, p_reason: "marcado desde la lista", p_undo: v.es_falso_positivo }));
+  const revocar = () => run(() => supabase.rpc("fnd_revoke_acceptance", { p_finding_key: v.finding_key }));
+  const aceptar = () => {
+    if (!ap || !ju || !ve) { setErr("Aprobador, justificación y fecha son obligatorios."); return; }
+    run(() => supabase.rpc("fnd_accept_risk",
+      { p_finding_key: v.finding_key, p_aprobado_por: ap, p_justificacion: ju, p_fecha_expiracion: ve }));
+  };
+  return (
+    <span className="triar" onClick={(e) => e.stopPropagation()}>
+      <button className="ghost btn-i" onClick={() => setOpen((o) => !o)}>Triar ▾</button>
+      {open && (
+        <>
+          <div className="pop-back" onClick={() => setOpen(false)} />
+          <div className="pop">
+            <div className="pop-h">{v.title.slice(0, 46)}</div>
+            <button className="pop-opt" disabled={busy} onClick={fp}>
+              {v.es_falso_positivo ? "Quitar falso positivo" : "Marcar falso positivo"}</button>
+            {v.es_riesgo_aceptado ? (
+              <button className="pop-opt" disabled={busy} onClick={revocar}>Revocar aceptación de riesgo</button>
+            ) : (
+              <div className="pop-sec">
+                <label>Aceptar riesgo</label>
+                <input placeholder="Aprueba" value={ap} onChange={(e) => setAp(e.currentTarget.value)} />
+                <input placeholder="Justificación / controles" value={ju} onChange={(e) => setJu(e.currentTarget.value)} />
+                <input type="date" value={ve} onChange={(e) => setVe(e.currentTarget.value)} />
+                <button disabled={busy} onClick={aceptar}>Guardar aceptación</button>
+              </div>
+            )}
+            {err && <p className="pop-err">{err}</p>}
+          </div>
+        </>
+      )}
+    </span>
+  );
+}
+
+// Badge(s) de disposición de un hallazgo.
+function Disp({ v }: { v: { es_falso_positivo: boolean; es_riesgo_aceptado: boolean; acepta_vence?: string | null } }) {
+  if (v.es_falso_positivo) return <span className="badge badge-neutral">falso positivo</span>;
+  if (v.es_riesgo_aceptado) return <span className="badge badge-reg" title={`Vence ${v.acepta_vence ?? ""}`}>riesgo aceptado</span>;
+  return <span className="dim">—</span>;
+}
+
+function VulnsTab({ vulns, onChange }: { vulns: VFinding[]; onChange: () => void }) {
   const abiertas = vulns.filter((v) => v.status !== "fixed" && v.status !== "not_observed");
-  async function fp(v: VFinding) {
-    setBusy(true);
-    await supabase.rpc("fnd_false_positive", { p_finding_key: v.finding_key, p_reason: "marcado desde la app", p_undo: v.es_falso_positivo });
-    setBusy(false); onChange();
-  }
-  async function aceptar(v: VFinding) {
-    const aprob = prompt("¿Quién aprueba la aceptación de riesgo?"); if (!aprob) return;
-    const just = prompt("Justificación / controles compensatorios:"); if (!just) return;
-    const venc = prompt("Fecha de expiración (YYYY-MM-DD):"); if (!venc) return;
-    setBusy(true);
-    const { error } = await supabase.rpc("fnd_accept_risk", { p_finding_key: v.finding_key, p_aprobado_por: aprob, p_justificacion: just, p_fecha_expiracion: venc });
-    setBusy(false); if (error) alert(error.message); else onChange();
-  }
   return (
     <div className="panel">
       <h3>{abiertas.length} hallazgos abiertos <span className="hint">— la verdad del escáner, ningún estado humano los cierra</span></h3>
@@ -934,14 +1015,8 @@ function VulnsTab({ vulns, onChange }: { vulns: VFinding[]; onChange: () => void
                   <td className="mono clip">{v.asset}</td>
                   <td>{v.kri_status ?? "—"}</td>
                   <td className={`num ${v.vencido_real ? "warn" : ""}`}>{sla != null ? (sla > 0 ? `-${sla}d` : `${-sla}d`) : "—"}</td>
-                  <td>
-                    {v.es_falso_positivo ? <span className="badge badge-neutral">falso positivo</span> : null}
-                    {v.es_riesgo_aceptado ? <span className="badge badge-reg" title={`Vence ${v.acepta_vence ?? ""}`}>riesgo aceptado</span> : null}
-                  </td>
-                  <td className="row-acts">
-                    <button className="ghost btn-i" disabled={busy} onClick={() => fp(v)}>{v.es_falso_positivo ? "quitar FP" : "falso pos."}</button>
-                    {!v.es_riesgo_aceptado && <button className="ghost btn-i" disabled={busy} onClick={() => aceptar(v)}>aceptar riesgo</button>}
-                  </td>
+                  <td><Disp v={v} /></td>
+                  <td className="row-acts"><Triar v={v} onChange={onChange} /></td>
                 </tr>
               );
             })}
@@ -990,7 +1065,7 @@ function Empty() { return <div className="empty">Sin datos. Carga un CSV.</div>;
 function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [cargando, setCargando] = useState(true);
-  const [tab, setTab] = useState<"dash" | "find" | "gest" | "upload" | "act">("dash");
+  const [tab, setTab] = useState<"dash" | "gest" | "upload" | "act">("dash");
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
@@ -1018,13 +1093,11 @@ function App() {
       </div>
       <nav className="tabs">
         <button className={tab === "dash" ? "active" : ""} onClick={() => setTab("dash")}>Dashboard</button>
-        <button className={tab === "find" ? "active" : ""} onClick={() => setTab("find")}>Hallazgos</button>
         <button className={tab === "gest" ? "active" : ""} onClick={() => setTab("gest")}>Gestión</button>
         <button className={tab === "upload" ? "active" : ""} onClick={() => setTab("upload")}>Cargar CSV</button>
         <button className={tab === "act" ? "active" : ""} onClick={() => setTab("act")}>Actividad</button>
       </nav>
       {tab === "dash" && <Dashboard key={reload} />}
-      {tab === "find" && <Hallazgos />}
       {tab === "gest" && <Gestion />}
       {tab === "upload" && <Upload quien={quien} onDone={() => setReload((r) => r + 1)} />}
       {tab === "act" && <Actividad />}
