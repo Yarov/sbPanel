@@ -67,6 +67,9 @@ fluyen de arriba hacia abajo en la carga, y de abajo hacia arriba en la lectura.
 > **⬡ RPC** (una función que escribe en la base). El color marca la zona: azul =
 > máquina del analista, morado = navegador, verde = Postgres. Los números ①–⑤ son
 > el orden del flujo, y cada flecha dice *qué pasa* en ese paso.
+>
+> 📐 **Versión visual detallada:** [`docs/arquitectura.html`](docs/arquitectura.html) —
+> ábrela en el navegador para ver cada componente con su tipo, su zona y qué hace.
 
 ```mermaid
 flowchart TB
