@@ -546,6 +546,202 @@ function Actividad() {
   );
 }
 
+// ---------- Gestión (la cola de remediación por app) ----------
+type AppGestion = {
+  epm: string; app_name: string | null; tier: string | null; usage: string | null;
+  exposed_internet: boolean | null; it_vp: string | null; it_manager: string | null;
+  contact_app: string | null; workflow_state: string; assignee: string | null;
+  blocked_reason: string | null; updated_by: string | null; updated_at: string | null;
+  abiertos: number; criticos: number; fuera_sla: number; vencidos: number;
+};
+type WfEvent = { id: number; at: string; action: string; by_user: string; de: string | null; a: string | null; comment: string | null };
+
+// Los estados humanos, con etiqueta y color. "atendido" es un reclamo sin
+// verificar — el escáner es quien de verdad cierra.
+const WF: Record<string, { txt: string; cls: string }> = {
+  sin_asignar: { txt: "Sin asignar", cls: "gris" },
+  asignado: { txt: "Asignado", cls: "blue" },
+  en_atencion: { txt: "En atención", cls: "amber" },
+  bloqueado_torre: { txt: "Torre no atiende", cls: "red" },
+  atendido: { txt: "Atendido (sin verificar)", cls: "green" },
+};
+const WF_ESTADOS = Object.keys(WF);
+
+function Gestion() {
+  const [rows, setRows] = useState<AppGestion[]>([]);
+  const [f, setF] = useState({ estado: "", vp: "", solo_criticos: false });
+  const [sel, setSel] = useState<AppGestion | null>(null);
+
+  async function load() {
+    const { data } = await supabase.from("v_app_gestion").select("*")
+      .order("criticos", { ascending: false }).order("abiertos", { ascending: false });
+    setRows((data ?? []) as AppGestion[]);
+  }
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const ch = supabase.channel("gest")
+      .on("postgres_changes", { event: "*", schema: "silver", table: "app_workflow" }, () => load())
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, []);
+
+  const vps = [...new Set(rows.map((r) => r.it_vp).filter(Boolean) as string[])].sort();
+  const vista = rows.filter((r) =>
+    (!f.estado || r.workflow_state === f.estado) &&
+    (!f.vp || r.it_vp === f.vp) &&
+    (!f.solo_criticos || r.criticos > 0));
+
+  // refresca la app seleccionada cuando cambie la lista (tras una acción)
+  useEffect(() => {
+    if (sel) { const u = rows.find((r) => r.epm === sel.epm); if (u) setSel(u); }
+  }, [rows]); // eslint-disable-line
+
+  return (
+    <div>
+      <div className="panel">
+        <div className="filters-bar">
+          <h2 className="grow">Gestión de remediación · {vista.length} apps</h2>
+          <select value={f.vp} onChange={(e) => setF((p) => ({ ...p, vp: e.currentTarget.value }))}>
+            <option value="">Todos los IT VP</option>{vps.map((v) => <option key={v}>{v}</option>)}
+          </select>
+          <select value={f.estado} onChange={(e) => setF((p) => ({ ...p, estado: e.currentTarget.value }))}>
+            <option value="">Todo estado</option>{WF_ESTADOS.map((s) => <option key={s} value={s}>{WF[s].txt}</option>)}
+          </select>
+          <button className={`chip-toggle ${f.solo_criticos ? "on" : ""}`}
+            onClick={() => setF((p) => ({ ...p, solo_criticos: !p.solo_criticos }))}>Solo con críticos</button>
+        </div>
+        <p className="hint">El riesgo (críticos, vencidos) lo dice el escáner. El estado es el seguimiento del equipo — no cambia el número.</p>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr><th>App</th><th>IT VP</th><th>Estado</th><th>Asignado</th>
+              <th>Crít</th><th>Venc.</th><th>Abiertos</th><th></th></tr></thead>
+            <tbody>
+              {vista.map((r) => (
+                <tr key={r.epm} className={sel?.epm === r.epm ? "sel" : ""}>
+                  <td className="clip">{r.app_name ?? r.epm}{r.exposed_internet ? <span className="tag-exp" title="Expuesta a internet"> ⬈ internet</span> : ""}</td>
+                  <td className="clip">{r.it_vp ?? "—"}</td>
+                  <td><span className={`akind akind-${WF[r.workflow_state]?.cls ?? "gris"}`}>{WF[r.workflow_state]?.txt ?? r.workflow_state}</span></td>
+                  <td>{r.assignee ?? "—"}</td>
+                  <td className={r.criticos ? "hot" : ""}>{r.criticos}</td>
+                  <td className={r.vencidos ? "warn" : ""}>{r.vencidos}</td>
+                  <td>{r.abiertos}</td>
+                  <td><button className="ghost btn-i" onClick={() => setSel(r)}>Gestionar</button></td>
+                </tr>
+              ))}
+              {!vista.length && <tr><td colSpan={8} className="empty">Sin apps. Carga un escaneo.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {sel && <GestionApp app={sel} onClose={() => setSel(null)} onChange={load} />}
+    </div>
+  );
+}
+
+// Panel de una app: cambiar estado, asignar, comentar, y su historial.
+function GestionApp({ app, onClose, onChange }: { app: AppGestion; onClose: () => void; onChange: () => void }) {
+  const [log, setLog] = useState<WfEvent[]>([]);
+  const [asignado, setAsignado] = useState(app.assignee ?? "");
+  const [comentario, setComentario] = useState("");
+  const [motivo, setMotivo] = useState(app.blocked_reason ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function cargarLog() {
+    const { data } = await supabase.from("v_workflow_log").select("*")
+      .eq("epm", app.epm).order("at", { ascending: false }).limit(50);
+    setLog((data ?? []) as WfEvent[]);
+  }
+  useEffect(() => { cargarLog(); setAsignado(app.assignee ?? ""); setMotivo(app.blocked_reason ?? ""); }, [app.epm]);
+
+  async function correr(fn: () => PromiseLike<{ error: any }>) {
+    setBusy(true); setErr("");
+    const { error } = await fn();
+    setBusy(false);
+    if (error) { setErr(error.message); return false; }
+    await cargarLog(); onChange(); return true;
+  }
+  const asignar = () => correr(() => supabase.rpc("wf_assign", { p_epm: app.epm, p_assignee: asignado }));
+  const setEstado = (estado: string) => correr(() => supabase.rpc("wf_set_state",
+    { p_epm: app.epm, p_state: estado, p_comment: comentario || null, p_blocked_reason: motivo || null }))
+    .then((ok) => { if (ok) setComentario(""); });
+  const comentar = async () => { if (await correr(() => supabase.rpc("wf_comment", { p_epm: app.epm, p_comment: comentario }))) setComentario(""); };
+
+  return (
+    <div className="drawer">
+      <div className="drawer-h">
+        <div>
+          <h3>{app.app_name ?? app.epm}</h3>
+          <span className="hint">{app.epm} · {app.it_vp ?? "sin VP"} · {app.it_manager ?? "sin manager"}</span>
+        </div>
+        <button className="ghost btn-i" onClick={onClose}><X size={15} /> Cerrar</button>
+      </div>
+
+      <div className="drawer-risk">
+        <span className="hot">{app.criticos} críticos</span>
+        <span className="warn">{app.vencidos} vencidos</span>
+        <span>{app.abiertos} abiertos</span>
+        {app.exposed_internet && <span className="tag-exp">expuesta a internet</span>}
+        <span className="hint">— lo dice el escáner</span>
+      </div>
+
+      <div className="drawer-sec">
+        <label>Asignar remediación a</label>
+        <div className="row-inline">
+          <input value={asignado} onChange={(e) => setAsignado(e.currentTarget.value)}
+            placeholder="Nombre del responsable" />
+          <button onClick={asignar} disabled={busy}>Asignar</button>
+        </div>
+      </div>
+
+      <div className="drawer-sec">
+        <label>Estado del seguimiento</label>
+        <div className="wf-btns">
+          {WF_ESTADOS.map((s) => (
+            <button key={s} disabled={busy}
+              className={`wf-btn wf-${WF[s].cls} ${app.workflow_state === s ? "on" : ""}`}
+              onClick={() => setEstado(s)}>{WF[s].txt}</button>
+          ))}
+        </div>
+        {(app.workflow_state === "bloqueado_torre" || motivo) && (
+          <input className="mt" value={motivo} onChange={(e) => setMotivo(e.currentTarget.value)}
+            placeholder="Motivo del bloqueo (obligatorio para 'Torre no atiende')" />
+        )}
+      </div>
+
+      <div className="drawer-sec">
+        <label>Comentario</label>
+        <div className="row-inline">
+          <input value={comentario} onChange={(e) => setComentario(e.currentTarget.value)}
+            placeholder="Nota (se adjunta al cambio de estado o va sola)" />
+          <button className="ghost" onClick={comentar} disabled={busy || !comentario}>Comentar</button>
+        </div>
+      </div>
+
+      {err && <p className="error"><AlertTriangle size={14} /> {err}</p>}
+
+      <div className="drawer-sec">
+        <label>Historial</label>
+        <ul className="wf-log">
+          {log.map((e) => (
+            <li key={e.id}>
+              <span className="wf-log-when">{e.at.slice(0, 16).replace("T", " ")}</span>
+              <span className="wf-log-what">
+                {e.action === "assign" && <>asignó a <b>{e.a ?? "—"}</b></>}
+                {e.action === "state" && <>{WF[e.de ?? ""]?.txt ?? e.de ?? "—"} → <b>{WF[e.a ?? ""]?.txt ?? e.a}</b></>}
+                {e.action === "comment" && <>💬 {e.comment}</>}
+                {e.action === "state" && e.comment && <span className="wf-log-c"> · {e.comment}</span>}
+              </span>
+              <span className="wf-log-who">{e.by_user}</span>
+            </li>
+          ))}
+          {!log.length && <li className="empty">Sin movimientos.</li>}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 function Kpi({ n, label, tone }: { n: number; label: string; tone?: string }) {
   return <div className={`kpi ${tone ? "kpi-" + tone : ""}`}><div className="kpi-n">{Number(n).toLocaleString()}</div><div className="kpi-l">{label}</div></div>;
 }
@@ -563,7 +759,7 @@ function Empty() { return <div className="empty">Sin datos. Carga un CSV.</div>;
 function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [cargando, setCargando] = useState(true);
-  const [tab, setTab] = useState<"dash" | "find" | "upload" | "act">("dash");
+  const [tab, setTab] = useState<"dash" | "find" | "gest" | "upload" | "act">("dash");
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
@@ -592,11 +788,13 @@ function App() {
       <nav className="tabs">
         <button className={tab === "dash" ? "active" : ""} onClick={() => setTab("dash")}>Dashboard</button>
         <button className={tab === "find" ? "active" : ""} onClick={() => setTab("find")}>Hallazgos</button>
+        <button className={tab === "gest" ? "active" : ""} onClick={() => setTab("gest")}>Gestión</button>
         <button className={tab === "upload" ? "active" : ""} onClick={() => setTab("upload")}>Cargar CSV</button>
         <button className={tab === "act" ? "active" : ""} onClick={() => setTab("act")}>Actividad</button>
       </nav>
       {tab === "dash" && <Dashboard key={reload} />}
       {tab === "find" && <Hallazgos />}
+      {tab === "gest" && <Gestion />}
       {tab === "upload" && <Upload quien={quien} onDone={() => setReload((r) => r + 1)} />}
       {tab === "act" && <Actividad />}
     </main>
