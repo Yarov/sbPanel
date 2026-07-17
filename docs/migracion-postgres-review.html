@@ -1,0 +1,233 @@
+<title>Dejar Supabase → Postgres propio · Review</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0e0e11; --panel: #16161b; --card: #1c1c22; --card-hi: #24242c;
+    --line: #2c2c34; --fg: #e9e9ee; --muted: #8f8f9a; --dim: #6a6a74;
+    --brand: #ec111a;
+    --good: #37c98f; --warn: #f9922e; --bad: #f0555f; --info: #4b93f0; --v: #a98bfa;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f4f6; --panel:#fff; --card:#fff; --card-hi:#f0f0f3; --line:#e2e2e8;
+      --fg:#1a1a1f; --muted:#63636e; --dim:#8a8a95;
+      --good:#059669; --warn:#c2680a; --bad:#dc2626; --info:#2563eb; --v:#7c3aed; }
+  }
+  :root[data-theme="dark"] { --bg:#0e0e11; --panel:#16161b; --card:#1c1c22; --card-hi:#24242c;
+    --line:#2c2c34; --fg:#e9e9ee; --muted:#8f8f9a; --dim:#6a6a74;
+    --good:#37c98f; --warn:#f9922e; --bad:#f0555f; --info:#4b93f0; --v:#a98bfa; }
+  :root[data-theme="light"] { --bg:#f4f4f6; --panel:#fff; --card:#fff; --card-hi:#f0f0f3; --line:#e2e2e8;
+    --fg:#1a1a1f; --muted:#63636e; --dim:#8a8a95;
+    --good:#059669; --warn:#c2680a; --bad:#dc2626; --info:#2563eb; --v:#7c3aed; }
+
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font-family:var(--sans);
+         line-height:1.55; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 2.6rem 1.4rem 4rem; }
+  .head { display:flex; align-items:center; gap:.8rem; margin-bottom:.5rem; }
+  .brandbar { width:4px; height:1.8rem; background:var(--brand); border-radius:2px; }
+  h1 { font-size:1.5rem; margin:0; letter-spacing:-.01em; }
+  h2 { font-size:1.05rem; margin:2.4rem 0 .9rem; display:flex; align-items:center; gap:.55rem; }
+  h2::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--brand); }
+  .sub { color:var(--muted); font-size:.96rem; margin:0 0 1.4rem; max-width:64ch; }
+  p { max-width: 68ch; }
+  code, .mono { font-family:var(--mono); font-size:.86em; }
+  code { background:var(--card); border:1px solid var(--line); border-radius:4px; padding:.05rem .3rem; }
+
+  /* TL;DR */
+  .tldr { background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--good);
+          border-radius:12px; padding:1.1rem 1.2rem; margin:1.4rem 0 .6rem; }
+  .tldr .k { font-size:.72rem; text-transform:uppercase; letter-spacing:.09em; color:var(--good); font-weight:700; }
+  .tldr p { margin:.5rem 0 0; }
+
+  /* verdict pills */
+  .pill { display:inline-flex; align-items:center; gap:.35rem; font-size:.72rem; font-weight:700;
+          text-transform:uppercase; letter-spacing:.04em; padding:.2rem .55rem; border-radius:999px; }
+  .p-good { background:color-mix(in srgb,var(--good) 20%,transparent); color:var(--good); }
+  .p-warn { background:color-mix(in srgb,var(--warn) 22%,transparent); color:var(--warn); }
+  .p-bad  { background:color-mix(in srgb,var(--bad) 20%,transparent); color:var(--bad); }
+  .p-info { background:color-mix(in srgb,var(--info) 20%,transparent); color:var(--info); }
+
+  /* cards */
+  .cards { display:grid; grid-template-columns:1fr 1fr; gap:.9rem; }
+  @media (max-width:680px){ .cards { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1rem 1.1rem; }
+  .card h3 { margin:0 0 .3rem; font-size:1rem; display:flex; align-items:center; gap:.5rem; justify-content:space-between; }
+  .card .lead { color:var(--muted); font-size:.86rem; margin:.2rem 0 .7rem; }
+  .card ul { margin:.4rem 0 0; padding-left:1.1rem; }
+  .card li { font-size:.86rem; margin:.25rem 0; color:var(--fg); }
+  .card li.no::marker { content:"✕  "; color:var(--bad); }
+  .card li.yes::marker { content:"✓  "; color:var(--good); }
+
+  /* table */
+  .tw { overflow-x:auto; border:1px solid var(--line); border-radius:12px; margin:.6rem 0; }
+  table { border-collapse:collapse; width:100%; font-size:.87rem; min-width:520px; }
+  th,td { text-align:left; padding:.6rem .8rem; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:700; background:var(--panel); }
+  tr:last-child td { border-bottom:none; }
+  td .mono { color:var(--v); }
+
+  /* replace list */
+  .svc { border:1px solid var(--line); border-radius:12px; padding:.9rem 1.05rem; margin:.6rem 0; background:var(--card); }
+  .svc-h { display:flex; align-items:baseline; gap:.6rem; flex-wrap:wrap; }
+  .svc-h .name { font-family:var(--mono); font-weight:700; }
+  .svc-h .cnt { color:var(--dim); font-size:.78rem; }
+  .svc p { margin:.45rem 0 0; font-size:.87rem; color:var(--muted); }
+  .svc b { color:var(--fg); }
+
+  /* paths */
+  .path { border:1px solid var(--line); border-radius:12px; padding:1rem 1.15rem; background:var(--panel); }
+  .path.a { border-left:4px solid var(--good); }
+  .path.b { border-left:4px solid var(--warn); }
+  .path h3 { margin:0 0 .2rem; font-size:1.02rem; }
+  .path .m { color:var(--muted); font-size:.86rem; }
+
+  .steps { counter-reset:s; list-style:none; padding:0; margin:.6rem 0 0; }
+  .steps li { counter-increment:s; position:relative; padding:.45rem 0 .45rem 2rem; font-size:.9rem; border-bottom:1px solid var(--line); }
+  .steps li:last-child { border-bottom:none; }
+  .steps li::before { content:counter(s); position:absolute; left:0; top:.4rem; width:1.4rem; height:1.4rem;
+    background:var(--brand); color:#fff; border-radius:50%; display:grid; place-items:center; font-size:.78rem; font-weight:700; }
+  .foot { color:var(--dim); font-size:.8rem; margin-top:2.4rem; border-top:1px solid var(--line); padding-top:1rem; }
+</style>
+
+<div class="wrap">
+  <div class="head"><span class="brandbar"></span><h1>Dejar Supabase → Postgres propio</h1></div>
+  <p class="sub">Review técnico: qué cuesta migrar el backend de Supabase a Postgres corriendo
+    en nuestra propia infraestructura. Escrito sobre el estado real de la app (1,295 líneas de
+    SQL, 18 funciones, 14 vistas, 11 tablas).</p>
+
+  <div class="tldr">
+    <span class="k">En una línea</span>
+    <p><b>El motor no cambia: Supabase ya <em>es</em> Postgres.</b> Todo el <code>schema.sql</code>
+    — tablas, funciones, vistas, RLS — se mueve tal cual con un <code>pg_dump</code>, riesgo casi
+    nulo. Lo único que hay que reemplazar son <b>4 servicios</b> que Supabase pone <em>encima</em>
+    de Postgres y que el front usa: la API REST, el realtime, el login y (a futuro) el storage.</p>
+  </div>
+
+  <h2>La distinción que lo decide todo</h2>
+  <p>"Migrar a Postgres" suena a cambio de base de datos, pero no lo es. Supabase = Postgres
+    administrado + una capa de servicios. Al irnos, <b>el Postgres se lo lleva completo</b>; lo que
+    se queda en Supabase es esa capa. Y esa capa es <b>open source y autohospedable</b> — se puede
+    correr la misma pieza dentro del banco.</p>
+
+  <div class="cards">
+    <div class="card">
+      <h3>Se mueve gratis <span class="pill p-good">sin reescribir</span></h3>
+      <p class="lead">Todo el trabajo pesado de esta sesión. <code>pg_dump | pg_restore</code>.</p>
+      <ul>
+        <li class="yes">11 tablas (bronze / silver)</li>
+        <li class="yes">18 funciones plpgsql: el motor <span class="mono">load_begin/batch/commit</span>, las 5 guardas, workflow, triage, métricas</li>
+        <li class="yes">14 vistas, incluida la fórmula del risk score</li>
+        <li class="yes">4 políticas RLS + índices + constraints</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Hay que reemplazar <span class="pill p-warn">4 servicios</span></h3>
+      <p class="lead">Lo que el front consume hoy de la plataforma Supabase.</p>
+      <ul>
+        <li class="no">API REST (PostgREST): <span class="mono">14 .rpc + 14 lecturas de vistas</span></li>
+        <li class="no">Realtime: <span class="mono">3 canales</span> (aviso de carga)</li>
+        <li class="no">Auth (login): <span class="mono">4 llamadas</span></li>
+        <li class="no">Storage: aún no se usa (el .csv.gz a futuro)</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Qué reemplaza a cada servicio</h2>
+  <p>Cada uno de los 4 tiene una versión open source que se autohospeda — es literalmente el mismo
+    software que corre Supabase — o una alternativa estándar.</p>
+
+  <div class="svc">
+    <div class="svc-h"><span class="name">PostgREST</span> <span class="pill p-good">reusable tal cual</span>
+      <span class="cnt">28 llamadas del front</span></div>
+    <p>Es la API REST que genera los endpoints automáticamente desde el esquema (las <code>v_*</code>
+      y los <code>.rpc()</code>). <b>Es open source y se autohospeda con un binario.</b> Se levanta
+      apuntando al mismo Postgres y el front <b>no cambia una línea</b> — solo la URL base.</p>
+  </div>
+  <div class="svc">
+    <div class="svc-h"><span class="name">Realtime</span> <span class="pill p-warn">3 opciones</span>
+      <span class="cnt">3 canales</span></div>
+    <p>Avisa al front cuando <code>bronze.loads</code> cambia de estado. Opciones: (a) autohospedar
+      el servidor Realtime de Supabase (mismo software); (b) <b>Postgres <code>LISTEN/NOTIFY</code></b>
+      + un websocket propio — trivial, ya que solo es un evento por carga; (c) o simplemente
+      <b>hacer polling</b> cada N segundos. Con 2 cargas al mes, la opción (c) es más que suficiente.</p>
+  </div>
+  <div class="svc">
+    <div class="svc-h"><span class="name">Auth (GoTrue)</span> <span class="pill p-info">oportunidad</span>
+      <span class="cnt">4 llamadas</span></div>
+    <p>Hoy el login es Supabase Auth. Autohospedable (GoTrue, open source). <b>Pero para un banco lo
+      correcto es integrar el SSO corporativo</b> (Azure AD / LDAP) — algo que de todos modos tocaba
+      hacer para producción. Migrar es la ocasión de hacerlo bien: el usuario entra con su cuenta
+      Scotia, no con una cuenta aparte.</p>
+  </div>
+  <div class="svc">
+    <div class="svc-h"><span class="name">Storage</span> <span class="pill p-good">sin impacto hoy</span></div>
+    <p>No se usa todavía. Cuando se guarde el <code>.csv.gz</code> de cada carga, cualquier bucket
+      S3-compatible interno sirve.</p>
+  </div>
+
+  <h2>Dos caminos</h2>
+
+  <div class="path a">
+    <h3>A · Autohospedar el stack Supabase completo &nbsp;<span class="pill p-good">recomendado</span></h3>
+    <p class="m">Correr Postgres + PostgREST + Realtime + GoTrue con Docker, dentro de la red del banco.</p>
+    <ul class="steps">
+      <li><code>pg_dump</code> de la base → <code>pg_restore</code> en el Postgres interno. El esquema entra idéntico.</li>
+      <li>Levantar el resto del stack (open source) apuntando a ese Postgres.</li>
+      <li>El front solo cambia la URL de Supabase por la interna. <b>Cero reescritura de código.</b></li>
+    </ul>
+    <p class="m" style="margin-top:.7rem"><b>Esfuerzo:</b> bajo-medio (infra + Docker). <b>Riesgo al modelo de datos:</b> nulo.
+      <b>Mejor para:</b> un banco que necesita los datos en su red pero no quiere reescribir nada.</p>
+  </div>
+
+  <div class="path b" style="margin-top:1rem">
+    <h3>B · Postgres pelón + API/auth propios &nbsp;<span class="pill p-warn">más control, más trabajo</span></h3>
+    <p class="m">Solo Postgres. Se construye una API (Node/Go) y se integra auth; realtime por LISTEN/NOTIFY o polling.</p>
+    <ul class="steps">
+      <li><code>pg_dump/restore</code> igual — la base entra idéntica.</li>
+      <li>Construir una capa API que exponga las mismas vistas y RPCs (o reescribir el front para hablar con ella).</li>
+      <li>Integrar SSO y el realtime/polling.</li>
+    </ul>
+    <p class="m" style="margin-top:.7rem"><b>Esfuerzo:</b> medio-alto (se construyen 2-3 servicios). <b>Riesgo al modelo:</b> nulo.
+      <b>Mejor para:</b> quien quiera dependencias mínimas y control total del stack, a cambio de mantenerlo.</p>
+  </div>
+
+  <h2>Comparación</h2>
+  <div class="tw">
+    <table>
+      <thead><tr><th>Dimensión</th><th>Seguir en Supabase</th><th>A · Supabase autohospedado</th><th>B · Postgres + propio</th></tr></thead>
+      <tbody>
+        <tr><td>Motor de base</td><td>Postgres</td><td>Postgres <span class="mono">(idéntico)</span></td><td>Postgres <span class="mono">(idéntico)</span></td></tr>
+        <tr><td>Reescribir el schema</td><td>—</td><td>No</td><td>No</td></tr>
+        <tr><td>Reescribir el front</td><td>—</td><td>Solo la URL</td><td>Parcial (nueva API)</td></tr>
+        <tr><td>Datos en red del banco</td><td class="mono">No (nube)</td><td class="mono">Sí</td><td class="mono">Sí</td></tr>
+        <tr><td>Servicios a mantener</td><td>0 (gestionado)</td><td>~4 (Docker)</td><td>~3 propios</td></tr>
+        <tr><td>Esfuerzo de migración</td><td>—</td><td>Bajo-medio</td><td>Medio-alto</td></tr>
+        <tr><td>Riesgo al modelo de datos</td><td>—</td><td>Nulo</td><td>Nulo</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>El ángulo banco</h2>
+  <p>La razón real para dejar Supabase en banca casi nunca es técnica: es <b>residencia de datos</b>.
+    Este dataset — hostnames de PROD, CVEs sin parchar, responsables — probablemente no puede vivir en
+    la nube de un tercero. Eso empuja a autohospedar, y la buena noticia es que <b>autohospedar no
+    obliga a reescribir</b>: el camino A pone exactamente lo mismo que hoy, pero dentro de la red del
+    banco, con SSO corporativo. Es el paso que de todos modos tocaba para producción.</p>
+
+  <h2>Veredicto</h2>
+  <div class="tldr" style="border-left-color:var(--good)">
+    <span class="k">Recomendación</span>
+    <p>Si el motivo es control, red interna o cumplimiento (lo esperable en banca): <b>camino A —
+    autohospedar el stack Supabase completo.</b> El Postgres se mueve intacto con <code>pg_dump</code>,
+    el front casi no cambia, y ganas residencia de datos + la ocasión de meter SSO. El camino B es
+    válido si quieres dependencias mínimas y no te pesa mantener la API. En ambos, <b>lo más difícil
+    que construimos — el motor de conciliación y la lógica en SQL — se mueve sin tocarse.</b></p>
+  </div>
+
+  <p class="foot">Nota: este review es solo Supabase→Postgres. Migrar a MongoDB sería otra historia —
+    perderías las 18 funciones plpgsql y las 14 vistas (el corazón del sistema no tiene equivalente en
+    Mongo) y habría que reescribir el backend. Nuestro dato es profundamente relacional; el motor SQL
+    es el activo. Postgres es la casa correcta.</p>
+</div>
